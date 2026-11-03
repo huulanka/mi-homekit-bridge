@@ -84,13 +84,23 @@ sudo /opt/mi-homekit-bridge/venv/bin/mi-homekit-bridge fetch-keys \
 You are asked for your Xiaomi account and password. They are only used for this
 one login and are never stored. The keys end up in `bindkeys.env` (mode 600).
 If Xiaomi asks for an additional verification, the command prints a link: open it,
-confirm, and run the command again. As an alternative you can get the keys with the
+confirm, and run the command again.
+
+#### Accounts without a password (Sign in with Apple/Google) or captcha prompts
+
+`fetch-keys` can only do a plain password login. If your Xiaomi account was created
+with *Sign in with Apple/Google/Facebook*, or Xiaomi insists on a captcha, the login
+is rejected ("Xiaomi rejected the login"). Use the QR-code login of the
 [Xiaomi Cloud Tokens Extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor)
-and write them into `bindkeys.env` yourself:
+instead: choose `q`, scan the code with the Mi Home app and note the `BLE KEY` of each
+sensor. Then store each key (the prompt is hidden, the file is created with mode 600):
 
 ```sh
-MI_HOMEKIT_BRIDGE_BINDKEY_A4C138XXXXXX=<32 hex characters>
+sudo /opt/mi-homekit-bridge/venv/bin/mi-homekit-bridge set-key A4:C1:38:XX:XX:XX
 ```
+
+The extractor also prints tokens for your other Xiaomi devices (e.g. a vacuum).
+Treat them as secrets and do not paste them anywhere.
 
 ### 4. Start
 
@@ -138,6 +148,7 @@ mac = "A4:C1:38:00:00:01"
 | `mi-homekit-bridge run` | run the bridge (used by the systemd unit) |
 | `mi-homekit-bridge scan [-t SECONDS]` | list nearby supported sensors with signal strength |
 | `mi-homekit-bridge fetch-keys [--env-file PATH] [--server REGION]` | fetch bindkeys from the Xiaomi cloud |
+| `mi-homekit-bridge set-key MAC [--env-file PATH]` | store a bindkey you got elsewhere (hidden prompt) |
 
 Add `-v` for debug logging.
 
@@ -145,7 +156,9 @@ Add `-v` for debug logging.
 
 - **Sensor shows a warning in the Home app**: it has not reported for
   `stale_after_minutes`. Check the range with `scan` (below about -90 dBm gets unreliable).
-- **"sends encrypted data but no bindkey is configured"**: run `fetch-keys`.
+- **"sends encrypted data but no bindkey is configured"**: run `fetch-keys` or `set-key`.
+- **"Xiaomi rejected the login"** although the password is right: see
+  [Accounts without a password](#accounts-without-a-password-sign-in-with-applegoogle-or-captcha-prompts).
 - **"No measurements - pair it in the Mi Home app"** in `scan`: stock-firmware
   sensors stay silent until they have been added to Mi Home.
 - **Bridge not found when pairing**: iPhone and bridge must be in the same network
