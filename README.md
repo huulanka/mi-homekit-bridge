@@ -255,7 +255,9 @@ sudo sqlite3 /var/lib/mi-homekit-bridge/history.db ".backup '/tmp/history-backup
 With `[weather]` enabled, the current outdoor temperature and humidity are fetched
 from [Open-Meteo](https://open-meteo.com) and stored like an additional sensor.
 Open-Meteo is free for non-commercial use and needs no API key. A postal code is
-resolved to coordinates once at startup. Weather data by
+resolved to coordinates once per start with OpenStreetMap's
+[Nominatim](https://nominatim.org) (geocoding data © OpenStreetMap contributors,
+ODbL); with `latitude`/`longitude` no lookup happens at all. Weather data by
 [Open-Meteo.com](https://open-meteo.com), licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 

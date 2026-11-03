@@ -4,6 +4,11 @@ Providers implement :class:`WeatherProvider`. The only provider so far is
 `Open-Meteo <https://open-meteo.com>`_: free for non-commercial use, no API key,
 worldwide coverage (for Germany it is based on the DWD ICON models).
 Weather data by Open-Meteo.com, licensed under CC BY 4.0.
+
+Postal codes are resolved to coordinates with OpenStreetMap's Nominatim, once per
+start (its usage policy allows occasional lookups by identified applications).
+Open-Meteo's own geocoder only knows a few postal codes per town.
+Geocoding data (c) OpenStreetMap contributors, ODbL.
 """
 
 from __future__ import annotations
@@ -47,18 +52,17 @@ class WeatherProvider(Protocol):
     async def current(self) -> Observation: ...
 
 
-def parse_geocoding(data: dict[str, Any], postal_code: str, country: str) -> Location:
-    """Pick the best match for a postal code from an Open-Meteo geocoding response."""
-    results = [r for r in data.get("results") or [] if r.get("country_code") == country]
-    if not results:
+def parse_nominatim(data: Any, postal_code: str, country: str) -> Location:
+    """Location from a Nominatim structured search response (``format=jsonv2``)."""
+    if not isinstance(data, list) or not data:
         raise WeatherError(f"postal code {postal_code} not found in {country}")
-    exact = [r for r in results if postal_code in (r.get("postcodes") or [])]
-    best = (exact or results)[0]
-    return Location(
-        latitude=float(best["latitude"]),
-        longitude=float(best["longitude"]),
-        label=f"{postal_code} {best.get('name', '')}".strip(),
-    )
+    best = data[0]
+    try:
+        latitude, longitude = float(best["lat"]), float(best["lon"])
+    except (KeyError, TypeError, ValueError) as err:
+        raise WeatherError("unexpected geocoding response") from err
+    place = ", ".join(str(best.get("display_name", "")).split(", ")[1:2])
+    return Location(latitude, longitude, f"{postal_code} {place}".strip())
 
 
 def parse_current(data: dict[str, Any]) -> Observation:
@@ -79,7 +83,7 @@ def parse_current(data: dict[str, Any]) -> Observation:
 class OpenMeteo:
     """Current conditions from Open-Meteo."""
 
-    GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
+    GEOCODING_URL = "https://nominatim.openstreetmap.org/search"
     FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
     def __init__(self, session: aiohttp.ClientSession, config: WeatherConfig) -> None:
@@ -91,7 +95,7 @@ class OpenMeteo:
                 config.latitude, config.longitude, f"{config.latitude}, {config.longitude}"
             )
 
-    async def _get_json(self, url: str, params: dict[str, str]) -> dict[str, Any]:
+    async def _get_json(self, url: str, params: dict[str, str]) -> Any:
         try:
             async with self._session.get(
                 url, params=params, timeout=_TIMEOUT, headers={"User-Agent": USER_AGENT}
@@ -100,8 +104,6 @@ class OpenMeteo:
                 data = await response.json()
         except (aiohttp.ClientError, TimeoutError, ValueError) as err:
             raise WeatherError(f"{url}: {err}") from err
-        if not isinstance(data, dict):
-            raise WeatherError(f"{url}: unexpected response")
         return data
 
     async def location(self) -> Location:
@@ -112,9 +114,14 @@ class OpenMeteo:
                 raise WeatherError("no weather location configured")
             data = await self._get_json(
                 self.GEOCODING_URL,
-                {"name": postal_code, "countryCode": country, "count": "10", "format": "json"},
+                {
+                    "postalcode": postal_code,
+                    "countrycodes": country.lower(),
+                    "format": "jsonv2",
+                    "limit": "1",
+                },
             )
-            self._location = parse_geocoding(data, postal_code, country)
+            self._location = parse_nominatim(data, postal_code, country)
             _LOGGER.info(
                 "Weather location: %s (%.3f, %.3f)",
                 self._location.label,
@@ -134,6 +141,8 @@ class OpenMeteo:
                 "timezone": "GMT",
             },
         )
+        if not isinstance(data, dict):
+            raise WeatherError(f"{self.FORECAST_URL}: unexpected response")
         return parse_current(data)
 
 

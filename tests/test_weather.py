@@ -11,55 +11,34 @@ from mi_homekit_bridge.weather import (
     OpenMeteo,
     WeatherError,
     parse_current,
-    parse_geocoding,
+    parse_nominatim,
 )
 
-GEOCODING = {
-    "results": [
-        {
-            "name": "Lehel",
-            "postcodes": ["80331", "80538"],
-            "latitude": 48.14,
-            "longitude": 11.59,
-            "country_code": "DE",
-        },
-        {
-            "name": "München",
-            "postcodes": ["80331"],
-            "latitude": 48.137,
-            "longitude": 11.575,
-            "country_code": "DE",
-        },
-        {
-            "name": "Somewhere",
-            "postcodes": ["80331"],
-            "latitude": 1.0,
-            "longitude": 2.0,
-            "country_code": "XX",
-        },
-    ]
-}
+GEOCODING = [
+    {
+        "lat": "52.5323",
+        "lon": "13.3846",
+        "display_name": "10115, Mitte, Berlin, Deutschland",
+        "addresstype": "postcode",
+    }
+]
 CURRENT = {
     "current": {"time": "2026-11-03T21:15", "temperature_2m": 3.9, "relative_humidity_2m": 81}
 }
 
 
-def test_parse_geocoding_prefers_exact_postcode_in_country() -> None:
-    location = parse_geocoding(GEOCODING, "80331", "DE")
-    assert (location.latitude, location.longitude) == (48.14, 11.59)
-    assert location.label == "80331 Lehel"
+def test_parse_nominatim() -> None:
+    location = parse_nominatim(GEOCODING, "10115", "DE")
+    assert (location.latitude, location.longitude) == (52.5323, 13.3846)
+    assert location.label == "10115 Mitte"
 
 
-def test_parse_geocoding_falls_back_to_first_result() -> None:
-    location = parse_geocoding(GEOCODING, "99999", "DE")
-    assert location.label == "99999 Lehel"
-
-
-def test_parse_geocoding_not_found() -> None:
-    with pytest.raises(WeatherError, match="not found"):
-        parse_geocoding({"results": []}, "80331", "DE")
+@pytest.mark.parametrize(
+    "data", [[], {}, None, [{"lat": "x", "lon": "1"}], [{"name": "no coords"}]]
+)
+def test_parse_nominatim_rejects_garbage(data: object) -> None:
     with pytest.raises(WeatherError):
-        parse_geocoding({}, "80331", "AT")
+        parse_nominatim(data, "10115", "DE")
 
 
 def test_parse_current() -> None:
@@ -115,7 +94,7 @@ async def test_open_meteo_resolves_postal_code_once() -> None:
             OpenMeteo.FORECAST_URL: FakeResponse(CURRENT),
         }
     )
-    config = WeatherConfig(enabled=True, postal_code="80331", country="DE")
+    config = WeatherConfig(enabled=True, postal_code="10115", country="DE")
     provider = OpenMeteo(session, config)  # type: ignore[arg-type]
 
     first = await provider.current()
@@ -125,8 +104,15 @@ async def test_open_meteo_resolves_postal_code_once() -> None:
     urls = [url for url, _ in session.calls]
     assert urls.count(OpenMeteo.GEOCODING_URL) == 1
     assert urls.count(OpenMeteo.FORECAST_URL) == 2
+    geocoding_params = session.calls[0][1]
+    assert geocoding_params == {
+        "postalcode": "10115",
+        "countrycodes": "de",
+        "format": "jsonv2",
+        "limit": "1",
+    }
     forecast_params = session.calls[1][1]
-    assert forecast_params["latitude"] == "48.1400"
+    assert forecast_params["latitude"] == "52.5323"
     assert forecast_params["timezone"] == "GMT"
 
 
