@@ -21,6 +21,7 @@ from .history import HistoryStore, Sample, SensorInfo
 from .homekit import ThermometerAccessory, create_bridge, create_driver
 from .scanner import create_scanner
 from .weather import WeatherError, WeatherProvider, create_provider
+from .web import start_web
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -183,6 +184,9 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
                 config.history.interval_minutes,
                 store.path,
             )
+            if config.web.enabled:
+                runner = await start_web(store, config.web.host, config.web.port)
+                stack.push_async_callback(runner.cleanup)
 
         scanner = create_scanner(lambda info: app.handle_advertisement(info, loop.time()))
         await driver.async_start()

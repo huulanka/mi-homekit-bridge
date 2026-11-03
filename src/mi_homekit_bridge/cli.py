@@ -1,4 +1,4 @@
-"""Command line interface: ``run``, ``scan``, ``fetch-keys`` and ``set-key``."""
+"""Command line interface: ``run``, ``scan``, ``fetch-keys``, ``set-key`` and ``demo``."""
 
 from __future__ import annotations
 
@@ -64,6 +64,11 @@ def _build_parser() -> argparse.ArgumentParser:
     setkey = sub.add_parser("set-key", help="store a bindkey obtained elsewhere (hidden prompt)")
     setkey.add_argument("mac", help="MAC address of the sensor")
     setkey.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE, metavar="PATH")
+
+    demo = sub.add_parser("demo", help="serve the dashboard with generated sample data")
+    demo.add_argument("--host", default="127.0.0.1")
+    demo.add_argument("--port", type=int, default=8080)
+    demo.add_argument("--days", type=int, default=400, help="days of sample data")
     return parser
 
 
@@ -150,6 +155,34 @@ def _cmd_set_key(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _serve_demo(host: str, port: int, days: int) -> None:
+    import signal
+    import tempfile
+
+    from .demo import create_demo_store
+    from .web import start_web
+
+    with tempfile.TemporaryDirectory(prefix="mi-homekit-bridge-demo-") as tmp:
+        print(f"Generating {days} days of sample data...")
+        store = await asyncio.to_thread(create_demo_store, Path(tmp) / "demo.db", days)
+        runner = await start_web(store, host, port)
+        print(f"Demo dashboard: http://{host}:{port}  (Ctrl+C to stop)")
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+        try:
+            await stop.wait()
+        finally:
+            await runner.cleanup()
+            store.close()
+
+
+def _cmd_demo(args: argparse.Namespace) -> int:
+    asyncio.run(_serve_demo(args.host, args.port, args.days))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
@@ -166,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         "scan": _cmd_scan,
         "fetch-keys": _cmd_fetch_keys,
         "set-key": _cmd_set_key,
+        "demo": _cmd_demo,
     }
     try:
         return commands[args.command](args)
