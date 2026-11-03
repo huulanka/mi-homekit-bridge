@@ -18,7 +18,7 @@ commit, paste into an issue or share by accident.
   back into the config file.
 - On a systemd host the variables come from `EnvironmentFile=/etc/mi-homekit-bridge/bindkeys.env`
   (root-only, mode 600). systemd reads the file before dropping privileges, so the
-  service user (`DynamicUser=yes`) cannot read the file itself.
+  unprivileged service user cannot read the file itself.
 - Xiaomi credentials are never stored; `fetch-keys` prompts for them.
 - Tests use generated, throw-away keys and example MAC addresses only.
 - CI runs gitleaks on the full history.
@@ -27,5 +27,5 @@ commit, paste into an issue or share by accident.
 
 - Config files can be shared safely for support.
 - Environment variables are visible to root and to the service's own user via
-  `/proc/<pid>/environ`. With a dedicated dynamic user this is acceptable for these
-  low-impact secrets.
+  `/proc/<pid>/environ`. With a dedicated system user that runs nothing else this
+  is acceptable for these low-impact secrets.

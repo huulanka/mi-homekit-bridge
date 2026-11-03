@@ -18,7 +18,8 @@ uv export --frozen --no-dev --no-emit-project --format requirements.txt \
 wheel="$(basename dist/*.whl)"
 
 remote_tmp="$(ssh "$host" mktemp -d)"
-scp -q dist/requirements.txt "dist/$wheel" deploy/mi-homekit-bridge.service "$host:$remote_tmp/"
+scp -q dist/requirements.txt "dist/$wheel" deploy/mi-homekit-bridge.service \
+    deploy/mi-homekit-bridge.sysusers "$host:$remote_tmp/"
 
 ssh "$host" sudo bash -s -- "$remote_tmp" "$wheel" <<'REMOTE'
 set -euo pipefail
@@ -34,8 +35,10 @@ fi
 "$prefix/venv/bin/pip" install --quiet --disable-pip-version-check \
     --no-deps --force-reinstall "$tmp/$wheel"
 
+install -D -m 644 "$tmp/mi-homekit-bridge.sysusers" /etc/sysusers.d/mi-homekit-bridge.conf
+systemd-sysusers /etc/sysusers.d/mi-homekit-bridge.conf
 install -d -m 755 /etc/mi-homekit-bridge
-install -m 644 "$tmp/mi-homekit-bridge.service" /etc/systemd/system/mi-homekit-bridge.service
+install -D -m 644 "$tmp/mi-homekit-bridge.service" /etc/systemd/system/mi-homekit-bridge.service
 systemctl daemon-reload
 if systemctl is-active --quiet mi-homekit-bridge; then
     systemctl restart mi-homekit-bridge
