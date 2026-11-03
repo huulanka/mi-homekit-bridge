@@ -15,6 +15,10 @@ Each sensor shows up in the Home app with temperature, humidity and battery leve
 The bridge only listens to the advertisements the sensors broadcast anyway; it never
 connects to them.
 
+Optionally it also keeps a **measurement history** in a local SQLite database and
+records the **outdoor temperature and humidity** for your postal code from a weather
+service, so you can compare indoor and outdoor climate over days, months and years.
+
 Under the hood it glues together the libraries that also power Home Assistant:
 [bleak](https://github.com/hbldh/bleak) (Bluetooth),
 [xiaomi-ble](https://github.com/Bluetooth-Devices/xiaomi-ble) and
@@ -129,6 +133,10 @@ The repository only contains example MAC addresses and throw-away test keys. CI 
 
 ## Configuration reference
 
+All settings live in `/etc/mi-homekit-bridge/config.toml` (see
+[config.example.toml](config.example.toml)). Unknown options are reported as errors,
+so typos do not go unnoticed. Restart the service after changes.
+
 ```toml
 [bridge]
 name = "Mi Thermometers"     # bridge name in the Home app
@@ -139,7 +147,45 @@ stale_after_minutes = 60     # flag a sensor as faulty after this long without d
 [[sensors]]
 name = "Living Room"
 mac = "A4:C1:38:00:00:01"
+
+[history]                    # optional, enabled by default
+enabled = true
+interval_minutes = 5         # one sample per sensor every 5 minutes
+
+[weather]                    # optional, disabled by default, requires [history]
+enabled = true
+provider = "open-meteo"
+name = "Outdoor"
+postal_code = "10115"        # postal code + country ...
+country = "DE"
+# latitude = 52.52           # ... or coordinates
+# longitude = 13.405
+interval_minutes = 15
 ```
+
+### History
+
+With `[history]` enabled, the bridge stores one sample per reporting sensor every
+`interval_minutes` in `/var/lib/mi-homekit-bridge/history.db` (SQLite). Samples are
+aligned to the clock (:00, :05, ...). Sensors that stopped reporting are not recorded,
+so gaps stay gaps. A year of 5-minute samples for three sensors is roughly 15 MB.
+After a restart the bridge shows the last recorded values (including battery level)
+until the sensors report again.
+
+Back up the database while the service is running with:
+
+```sh
+sudo sqlite3 /var/lib/mi-homekit-bridge/history.db ".backup '/tmp/history-backup.db'"
+```
+
+### Outdoor weather
+
+With `[weather]` enabled, the current outdoor temperature and humidity are fetched
+from [Open-Meteo](https://open-meteo.com) and stored like an additional sensor.
+Open-Meteo is free for non-commercial use and needs no API key. A postal code is
+resolved to coordinates once at startup. Weather data by
+[Open-Meteo.com](https://open-meteo.com), licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ## Commands
 

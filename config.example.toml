@@ -24,3 +24,25 @@ mac = "A4:C1:38:00:00:01"
 [[sensors]]
 name = "Bedroom"
 mac = "A4:C1:38:00:00:02"
+
+# Measurement history in a local SQLite database (<state dir>/history.db).
+[history]
+enabled = true
+# One sample per sensor every N minutes (1-60).
+interval_minutes = 5
+
+# Outdoor temperature and humidity from a weather service, recorded next to your
+# sensors. Requires [history]. No API key needed.
+[weather]
+enabled = false
+provider = "open-meteo"
+# Label in the history and dashboard.
+name = "Outdoor"
+# Location: either postal code + two-letter country code ...
+postal_code = "10115"
+country = "DE"
+# ... or coordinates:
+# latitude = 52.52
+# longitude = 13.405
+# How often to fetch (5-180 minutes). Open-Meteo updates every 15 minutes.
+interval_minutes = 15

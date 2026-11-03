@@ -1,13 +1,16 @@
 import asyncio
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from pyhap.accessory_driver import AccessoryDriver
 
-from mi_homekit_bridge.app import BridgeApp
-from mi_homekit_bridge.config import BridgeConfig, SensorConfig
+from mi_homekit_bridge.app import WEATHER_SENSOR_ID, BridgeApp, _fetch_weather
+from mi_homekit_bridge.config import BridgeConfig, SensorConfig, WeatherConfig
+from mi_homekit_bridge.history import HistoryStore, Sample, SensorInfo
 from mi_homekit_bridge.homekit import aid_for_mac, create_driver, load_or_create_setup
+from mi_homekit_bridge.weather import Observation, WeatherError
 
 from .helpers import (
     OTHER_MAC,
@@ -103,3 +106,67 @@ async def test_driver_reuses_setup_code(tmp_path: Path) -> None:
     second = create_driver(CONFIG, tmp_path, loop)
     assert first.state.pincode == second.state.pincode
     assert first.state.setup_id == second.state.setup_id
+
+
+async def test_samples_contain_only_reporting_sensors(driver: AccessoryDriver) -> None:
+    app = BridgeApp(CONFIG, driver)
+    assert app.samples(300) == []
+
+    app.handle_advertisement(service_info(encrypted_mibeacon(temperature_object(21.4))), now=1.0)
+    frame = encrypted_mibeacon(battery_object(80), counter=2)
+    app.handle_advertisement(service_info(frame), now=2.0)
+
+    (sample,) = app.samples(300)
+    assert (sample.sensor_id, sample.ts, sample.humidity, sample.battery) == (
+        TEST_MAC,
+        300,
+        None,
+        80,
+    )
+    assert sample.temperature == pytest.approx(21.4)
+
+
+async def test_restore_shows_last_values_but_keeps_fault(driver: AccessoryDriver) -> None:
+    app = BridgeApp(CONFIG, driver)
+    app.restore(
+        {TEST_MAC: Sample(TEST_MAC, 100, 19.5, 55.0, 64), "AA:BB:CC:DD:EE:FF": Sample("x", 1)}
+    )
+
+    accessory = app.channels[TEST_MAC].accessory
+    assert accessory.temperature == pytest.approx(19.5)
+    assert accessory.battery == 64
+    assert accessory.fault
+    assert app.samples(400) == []  # restored values are not recorded again
+
+
+async def test_sensor_infos_include_weather(driver: AccessoryDriver) -> None:
+    config = replace(
+        CONFIG, weather=WeatherConfig(enabled=True, name="Outdoor", latitude=1, longitude=1)
+    )
+    infos = BridgeApp(config, driver).sensor_infos()
+    assert [(i.id, i.kind) for i in infos] == [
+        (TEST_MAC, "ble"),
+        (OTHER_MAC, "ble"),
+        (WEATHER_SENSOR_ID, "weather"),
+    ]
+
+
+class FakeProvider:
+    def __init__(self, result: Observation | WeatherError) -> None:
+        self._result = result
+
+    async def current(self) -> Observation:
+        if isinstance(self._result, WeatherError):
+            raise self._result
+        return self._result
+
+
+async def test_fetch_weather_stores_observation(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.db")
+    store.upsert_sensors([SensorInfo(WEATHER_SENSOR_ID, "Outdoor", "weather")])
+
+    await _fetch_weather(FakeProvider(Observation(900, 4.5, 80.0)), store)
+    await _fetch_weather(FakeProvider(WeatherError("offline")), store)  # logged, not raised
+
+    assert store.latest(WEATHER_SENSOR_ID) == Sample(WEATHER_SENSOR_ID, 900, 4.5, 80.0, None)
+    store.close()
