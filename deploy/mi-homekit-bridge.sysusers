@@ -1,0 +1,2 @@
+# systemd-sysusers(8) definition for the service user.
+u mi-homekit-bridge - "mi-homekit-bridge service" /nonexistent /usr/sbin/nologin

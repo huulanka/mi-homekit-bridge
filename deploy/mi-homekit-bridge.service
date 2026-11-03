@@ -15,8 +15,11 @@ EnvironmentFile=-/etc/mi-homekit-bridge/bindkeys.env
 Restart=on-failure
 RestartSec=15
 
-# Runs as a throw-away system user; HomeKit pairing state lives in StateDirectory.
-DynamicUser=yes
+# Dedicated system user (deploy/mi-homekit-bridge.sysusers). DynamicUser= is not
+# used on purpose: D-Bus can only resolve dynamic users if nss-systemd is set up,
+# which is not the default on Debian/Raspberry Pi OS.
+User=mi-homekit-bridge
+Group=mi-homekit-bridge
 StateDirectory=mi-homekit-bridge
 StateDirectoryMode=0700
 UMask=0077
