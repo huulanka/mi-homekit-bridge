@@ -1,0 +1,44 @@
+[Unit]
+Description=BLE thermometer to HomeKit bridge
+Documentation=https://github.com/huulanka/mi-homekit-bridge
+After=bluetooth.target network-online.target
+Wants=bluetooth.target network-online.target
+
+[Service]
+Type=exec
+ExecStart=/opt/mi-homekit-bridge/venv/bin/mi-homekit-bridge run \
+    --config /etc/mi-homekit-bridge/config.toml \
+    --state-dir /var/lib/mi-homekit-bridge
+# Bindkeys (MI_HOMEKIT_BRIDGE_BINDKEY_<MAC>=...). Read by systemd as root, so the
+# file can stay root-only (mode 600). Optional for plaintext BTHome sensors.
+EnvironmentFile=-/etc/mi-homekit-bridge/bindkeys.env
+Restart=on-failure
+RestartSec=15
+
+# Runs as a throw-away system user; HomeKit pairing state lives in StateDirectory.
+DynamicUser=yes
+StateDirectory=mi-homekit-bridge
+StateDirectoryMode=0700
+UMask=0077
+
+# Hardening. Bluetooth is accessed via D-Bus (BlueZ), no device access needed.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

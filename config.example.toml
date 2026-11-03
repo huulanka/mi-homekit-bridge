@@ -1,0 +1,26 @@
+# mi-homekit-bridge configuration
+# Copy to /etc/mi-homekit-bridge/config.toml.
+#
+# This file contains NO secrets. Bindkeys for encrypted sensors are read from
+# environment variables named MI_HOMEKIT_BRIDGE_BINDKEY_<MAC without colons>,
+# e.g. MI_HOMEKIT_BRIDGE_BINDKEY_A4C138000001. `mi-homekit-bridge fetch-keys
+# --env-file /etc/mi-homekit-bridge/bindkeys.env` writes them for you.
+
+[bridge]
+# Name of the bridge in the Home app.
+name = "Mi Thermometers"
+# TCP port for HomeKit. Must be reachable from your home hub (HomePod / Apple TV).
+port = 51826
+# Address to announce via mDNS. Auto-detected if omitted.
+# address = "192.168.1.10"
+# Mark a sensor as faulty in HomeKit if it has not reported for this long.
+stale_after_minutes = 60
+
+# One block per thermometer. Find the MAC addresses with `mi-homekit-bridge scan`.
+[[sensors]]
+name = "Living Room"
+mac = "A4:C1:38:00:00:01"
+
+[[sensors]]
+name = "Bedroom"
+mac = "A4:C1:38:00:00:02"
