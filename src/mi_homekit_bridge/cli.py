@@ -1,4 +1,4 @@
-"""Command line interface: ``run``, ``scan`` and ``fetch-keys``."""
+"""Command line interface: ``run``, ``scan``, ``fetch-keys`` and ``set-key``."""
 
 from __future__ import annotations
 
@@ -10,10 +10,23 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .config import ConfigError, bindkey_env_var, load_config
+from .config import ConfigError, bindkey_env_var, load_config, normalize_mac, parse_bindkey
 
 DEFAULT_CONFIG = Path("/etc/mi-homekit-bridge/config.toml")
 DEFAULT_STATE_DIR = Path("/var/lib/mi-homekit-bridge")
+DEFAULT_ENV_FILE = Path("/etc/mi-homekit-bridge/bindkeys.env")
+
+LOGIN_REJECTED_HINT = """\
+Xiaomi rejected the login.
+
+This message does not necessarily mean the password is wrong. Xiaomi also rejects
+password logins when it wants a captcha, or when the account was created with
+"Sign in with Apple/Google/Facebook" and has no Xiaomi password at all.
+Do not retry too often, Xiaomi rate-limits failed logins.
+
+Alternative: log in via QR code with the Xiaomi Cloud Tokens Extractor
+(https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor) and store the
+"BLE KEY" of each sensor with:  mi-homekit-bridge set-key <MAC>"""
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -47,6 +60,10 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="REGION",
         help="Xiaomi cloud region, e.g. 'de' (repeatable, default: try all)",
     )
+
+    setkey = sub.add_parser("set-key", help="store a bindkey obtained elsewhere (hidden prompt)")
+    setkey.add_argument("mac", help="MAC address of the sensor")
+    setkey.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE, metavar="PATH")
     return parser
 
 
@@ -74,6 +91,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 def _cmd_fetch_keys(args: argparse.Namespace) -> int:
     from xiaomi_ble.cloud import (
         XiaomiCloudException,
+        XiaomiCloudInvalidPasswordException,
         XiaomiCloudTwoFactorAuthenticationException,
     )
 
@@ -91,6 +109,9 @@ def _cmd_fetch_keys(args: argparse.Namespace) -> int:
             "complete the check and run this command again:\n" + err.url,
             file=sys.stderr,
         )
+        return 2
+    except XiaomiCloudInvalidPasswordException:
+        print(LOGIN_REJECTED_HINT, file=sys.stderr)
         return 2
     except XiaomiCloudException as err:
         print(f"Xiaomi cloud login failed: {err}", file=sys.stderr)
@@ -117,6 +138,18 @@ def _cmd_fetch_keys(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_set_key(args: argparse.Namespace) -> int:
+    from .keys import write_env_file
+
+    mac = normalize_mac(args.mac)
+    key = getpass.getpass(f"Bindkey for {mac} (32 hex characters, input is hidden): ").strip()
+    if parse_bindkey(key) is None:
+        raise ConfigError("no bindkey entered")
+    write_env_file(args.env_file, {mac: key.lower()})
+    print(f"Stored {bindkey_env_var(mac)} in {args.env_file}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
@@ -128,7 +161,12 @@ def main(argv: list[str] | None = None) -> int:
         for noisy in ("pyhap", "xiaomi_ble", "bthome_ble"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    commands = {"run": _cmd_run, "scan": _cmd_scan, "fetch-keys": _cmd_fetch_keys}
+    commands = {
+        "run": _cmd_run,
+        "scan": _cmd_scan,
+        "fetch-keys": _cmd_fetch_keys,
+        "set-key": _cmd_set_key,
+    }
     try:
         return commands[args.command](args)
     except ConfigError as err:
