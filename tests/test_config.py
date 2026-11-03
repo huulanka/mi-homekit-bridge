@@ -121,3 +121,66 @@ def test_example_config_is_valid() -> None:
     example = Path(__file__).parent.parent / "config.example.toml"
     config = load_config(example, environ={})
     assert len(config.sensors) == 2
+
+
+def _weather(**weather: Any) -> dict[str, Any]:
+    return {"sensors": [_sensor()], "weather": {"enabled": True} | weather}
+
+
+def test_history_and_weather_defaults() -> None:
+    config = parse_config({"sensors": [_sensor()]}, environ={})
+    assert config.history.enabled
+    assert config.history.interval_minutes == 5
+    assert not config.weather.enabled
+
+
+def test_weather_by_postal_code() -> None:
+    config = parse_config(_weather(postal_code="80331", country="de", name="Außen"), environ={})
+    assert config.weather.enabled
+    assert (config.weather.postal_code, config.weather.country) == ("80331", "DE")
+    assert config.weather.name == "Außen"
+    assert config.weather.interval_minutes == 15
+
+
+def test_weather_by_coordinates() -> None:
+    config = parse_config(_weather(latitude=52.52, longitude=13.405), environ={})
+    assert (config.weather.latitude, config.weather.longitude) == (52.52, 13.405)
+
+
+@pytest.mark.parametrize(
+    ("weather", "message"),
+    [
+        ({}, "set a location"),
+        ({"postal_code": "80331"}, "set together"),
+        ({"postal_code": 80331, "country": "DE"}, "as a string"),
+        ({"postal_code": "80331", "country": "Germany"}, "two-letter"),
+        ({"latitude": 52.5}, "set together"),
+        ({"latitude": 91, "longitude": 0}, "between -90 and 90"),
+        ({"postal_code": "1", "country": "DE", "latitude": 1, "longitude": 1}, "either"),
+        ({"provider": "acme", "latitude": 1, "longitude": 1}, "one of"),
+        ({"latitude": 1, "longitude": 1, "interval_minutes": 1}, "between 5 and 180"),
+        ({"latitude": 1, "longitude": 1, "name": "Living Room"}, "already used"),
+    ],
+)
+def test_invalid_weather(weather: dict[str, Any], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config(_weather(**weather), environ={})
+
+
+def test_weather_needs_history() -> None:
+    data = _weather(latitude=1, longitude=1) | {"history": {"enabled": False}}
+    with pytest.raises(ConfigError, match="needs \\[history\\]"):
+        parse_config(data, environ={})
+
+
+def test_disabled_weather_location_is_optional() -> None:
+    config = parse_config({"sensors": [_sensor()], "weather": {"enabled": False}}, environ={})
+    assert not config.weather.enabled
+
+
+@pytest.mark.parametrize(
+    "history", [{"enabled": "yes"}, {"interval_minutes": 0}, {"interval_minutes": 61}, {"x": 1}]
+)
+def test_invalid_history(history: dict[str, Any]) -> None:
+    with pytest.raises(ConfigError):
+        parse_config({"sensors": [_sensor()], "history": history}, environ={})
