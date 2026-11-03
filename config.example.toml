@@ -46,3 +46,10 @@ country = "DE"
 # longitude = 13.405
 # How often to fetch (5-180 minutes). Open-Meteo updates every 15 minutes.
 interval_minutes = 15
+
+# Built-in read-only web dashboard. Requires [history]. Keep it on localhost and
+# publish it with a reverse proxy, e.g.: tailscale serve --https=443 http://127.0.0.1:8080
+[web]
+enabled = false
+host = "127.0.0.1"
+port = 8080

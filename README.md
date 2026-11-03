@@ -15,9 +15,12 @@ Each sensor shows up in the Home app with temperature, humidity and battery leve
 The bridge only listens to the advertisements the sensors broadcast anyway; it never
 connects to them.
 
-Optionally it also keeps a **measurement history** in a local SQLite database and
+Optionally it also keeps a **measurement history** in a local SQLite database,
 records the **outdoor temperature and humidity** for your postal code from a weather
-service, so you can compare indoor and outdoor climate over days, months and years.
+service, and serves a small **web dashboard** to explore it all over days, months
+and years.
+
+![Dashboard with sample data](docs/screenshots/dashboard-light.png)
 
 Under the hood it glues together the libraries that also power Home Assistant:
 [bleak](https://github.com/hbldh/bleak) (Bluetooth),
@@ -119,6 +122,70 @@ Home app → **+** → **Add Accessory** → scan the QR code from the log or en
 setup code manually. The setup code is also stored in
 `/var/lib/mi-homekit-bridge/setup.json` and stays the same across restarts.
 
+## Dashboard
+
+An optional, read-only web dashboard built into the bridge (no extra service):
+
+- **Overview**: one card per room with temperature, humidity, dew point, battery,
+  today's range, the difference to outdoor and the last 24 hours.
+- **History**: all sensors in one chart for 24 hours up to everything recorded.
+  Longer ranges show averages with a min–max band.
+- **Indoor minus outdoor**: how much warmer (or more humid) it is inside.
+- **Daily profile**: the typical course of a day by hour.
+- **Hour × day heatmap**: patterns such as heating schedules, airing or sun.
+- Every chart has a table view. CSV export of all data. Light and dark mode follow
+  the system, the language follows the browser (English, German).
+
+| Patterns | Phone, dark mode |
+|---|---|
+| ![Daily profile and heatmap](docs/screenshots/patterns-light.png) | ![Mobile dark mode](docs/screenshots/mobile-dark.png) |
+
+*Screenshots use generated sample data (`mi-homekit-bridge demo`).*
+
+Enable it in the config:
+
+```toml
+[web]
+enabled = true          # requires [history]
+host = "127.0.0.1"      # keep it on localhost ...
+port = 8080
+```
+
+... and publish it through a reverse proxy. With [Tailscale](https://tailscale.com),
+only devices in your tailnet can reach it and you get HTTPS for free:
+
+```sh
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8080
+# keep other apps reachable under their path, e.g.
+sudo tailscale serve --bg --https=443 --set-path=/smokeping http://127.0.0.1:80/smokeping
+```
+
+On the iPhone, open the URL in Safari and choose *Share → Add to Home Screen*.
+
+The dashboard has no login of its own and relies on the proxy for access control.
+It only offers read endpoints and sends strict security headers. Do not bind it to
+`0.0.0.0` on a network you do not trust.
+
+**Try it without sensors:**
+
+```sh
+uv run mi-homekit-bridge demo      # http://127.0.0.1:8080 with 400 days of sample data
+```
+
+<details>
+<summary>API</summary>
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/overview` | latest values, today's range and a 24 h sparkline per sensor |
+| `GET /api/series?range=24h\|7d\|30d\|1y\|all` | min/avg/max buckets (5 min, 30 min, 1 h or 1 day) |
+| `GET /api/profile?days=7\|30\|90\|365` | average per hour of day |
+| `GET /api/heatmap?days=14\|30\|90` | average per day and hour |
+| `GET /api/export.csv` | all samples |
+| `GET /api/health` | status and version |
+
+</details>
+
 ## Secrets and privacy
 
 | What | Where | Notes |
@@ -161,6 +228,11 @@ country = "DE"
 # latitude = 52.52           # ... or coordinates
 # longitude = 13.405
 interval_minutes = 15
+
+[web]                        # optional, disabled by default, requires [history]
+enabled = true
+host = "127.0.0.1"
+port = 8080
 ```
 
 ### History
@@ -195,6 +267,7 @@ resolved to coordinates once at startup. Weather data by
 | `mi-homekit-bridge scan [-t SECONDS]` | list nearby supported sensors with signal strength |
 | `mi-homekit-bridge fetch-keys [--env-file PATH] [--server REGION]` | fetch bindkeys from the Xiaomi cloud |
 | `mi-homekit-bridge set-key MAC [--env-file PATH]` | store a bindkey you got elsewhere (hidden prompt) |
+| `mi-homekit-bridge demo [--port 8080] [--days 400]` | serve the dashboard with generated sample data |
 
 Add `-v` for debug logging.
 
@@ -220,6 +293,20 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy
 
 Tests use synthetic advertisements generated with throw-away keys (`tests/helpers.py`).
 Design decisions are recorded in [docs/adr](docs/adr).
+
+The dashboard lives in [`frontend/`](frontend) (React, TypeScript, Tailwind CSS,
+Apache ECharts, built with Vite). It needs Node.js 26.12.1 or newer (older versions
+are affected by the Brotli decoder vulnerability CVE-2026-111497):
+
+```sh
+uv run mi-homekit-bridge demo                  # API with sample data on :8080
+cd frontend && npm ci && npm run dev           # http://localhost:5173, proxies /api
+npm run lint && npm run typecheck && npm test  # checks
+npm run build                                  # writes into src/mi_homekit_bridge/static
+```
+
+`scripts/deploy.sh` builds the frontend before packaging. Chart colors come from a
+palette validated for color-vision deficiencies in light and dark mode.
 
 ## Disclaimer
 

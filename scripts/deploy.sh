@@ -3,7 +3,8 @@
 #
 #   scripts/deploy.sh user@host
 #
-# Installs into /opt/mi-homekit-bridge/venv with the exact, hash-pinned
+# Builds the dashboard frontend (needs Node.js, see frontend/.node-version), then
+# installs into /opt/mi-homekit-bridge/venv with the exact, hash-pinned
 # dependency versions from uv.lock and (re)installs the systemd unit.
 # It never touches /etc/mi-homekit-bridge/config.toml or bindkeys.env.
 set -euo pipefail
@@ -12,6 +13,8 @@ host="${1:?usage: scripts/deploy.sh user@host}"
 cd "$(dirname "$0")/.."
 
 rm -rf dist
+npm --prefix frontend ci --silent
+npm --prefix frontend run build --silent
 uv build --wheel --quiet
 uv export --frozen --no-dev --no-emit-project --format requirements.txt \
     --output-file dist/requirements.txt --quiet

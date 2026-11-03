@@ -27,10 +27,14 @@ DEFAULT_WEATHER_INTERVAL_MINUTES = 15
 DEFAULT_WEATHER_NAME = "Outdoor"
 WEATHER_PROVIDERS = ("open-meteo",)
 
-_TOP_LEVEL_KEYS = {"bridge", "sensors", "history", "weather"}
+DEFAULT_WEB_HOST = "127.0.0.1"
+DEFAULT_WEB_PORT = 8080
+
+_TOP_LEVEL_KEYS = {"bridge", "sensors", "history", "weather", "web"}
 _BRIDGE_KEYS = {"name", "port", "address", "stale_after_minutes"}
 _SENSOR_KEYS = {"name", "mac"}
 _HISTORY_KEYS = {"enabled", "interval_minutes"}
+_WEB_KEYS = {"enabled", "host", "port"}
 _WEATHER_KEYS = {
     "enabled",
     "provider",
@@ -91,6 +95,16 @@ class WeatherConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WebConfig:
+    """The built-in dashboard. Listens on localhost by default; publish it with a
+    reverse proxy such as ``tailscale serve``."""
+
+    enabled: bool = False
+    host: str = DEFAULT_WEB_HOST
+    port: int = DEFAULT_WEB_PORT
+
+
+@dataclass(frozen=True, slots=True)
 class BridgeConfig:
     """The whole bridge."""
 
@@ -101,6 +115,7 @@ class BridgeConfig:
     stale_after_minutes: int = DEFAULT_STALE_AFTER_MINUTES
     history: HistoryConfig = HistoryConfig()
     weather: WeatherConfig = WeatherConfig()
+    web: WebConfig = WebConfig()
 
 
 def normalize_mac(value: str) -> str:
@@ -235,6 +250,16 @@ def _parse_weather(data: dict[str, Any]) -> WeatherConfig:
     )
 
 
+def _parse_web(data: dict[str, Any]) -> WebConfig:
+    where = "[web]"
+    table = _table(data, "web", _WEB_KEYS)
+    return WebConfig(
+        enabled=_bool(table, "enabled", False, where),
+        host=_opt_str(table, "host", where) or DEFAULT_WEB_HOST,
+        port=_int(table, "port", DEFAULT_WEB_PORT, 1, 65535, where),
+    )
+
+
 def _parse_sensor(raw: Any, index: int, environ: Mapping[str, str]) -> SensorConfig:
     where = f"sensors[{index}]"
     if not isinstance(raw, dict):
@@ -299,8 +324,13 @@ def parse_config(data: dict[str, Any], environ: Mapping[str, str] | None = None)
 
     history = _parse_history(data)
     weather = _parse_weather(data)
+    web = _parse_web(data)
     if weather.enabled and not history.enabled:
         raise ConfigError("[weather] needs [history] enabled: outdoor values are only recorded")
+    if web.enabled and not history.enabled:
+        raise ConfigError("[web] needs [history] enabled: the dashboard shows recorded data")
+    if web.enabled and web.port == port:
+        raise ConfigError("[web]: 'port' must differ from the HomeKit port in [bridge]")
     if weather.enabled and weather.name in {s.name for s in sensors}:
         raise ConfigError(f"[weather]: name {weather.name!r} is already used by a sensor")
 
@@ -312,6 +342,7 @@ def parse_config(data: dict[str, Any], environ: Mapping[str, str] | None = None)
         stale_after_minutes=stale,
         history=history,
         weather=weather,
+        web=web,
     )
 
 

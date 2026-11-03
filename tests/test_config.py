@@ -184,3 +184,27 @@ def test_disabled_weather_location_is_optional() -> None:
 def test_invalid_history(history: dict[str, Any]) -> None:
     with pytest.raises(ConfigError):
         parse_config({"sensors": [_sensor()], "history": history}, environ={})
+
+
+def test_web_defaults_and_options() -> None:
+    assert not parse_config({"sensors": [_sensor()]}, environ={}).web.enabled
+    web = parse_config(
+        {"sensors": [_sensor()], "web": {"enabled": True, "port": 9000, "host": "0.0.0.0"}},  # noqa: S104
+        environ={},
+    ).web
+    assert (web.enabled, web.host, web.port) == (True, "0.0.0.0", 9000)  # noqa: S104
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"web": {"enabled": True}, "history": {"enabled": False}}, "needs \\[history\\]"),
+        ({"web": {"enabled": True, "port": 51826}}, "must differ"),
+        ({"web": {"port": 0}}, "between 1 and 65535"),
+        ({"web": {"enabled": 1}}, "true or false"),
+        ({"web": {"listen": "x"}}, "unknown option"),
+    ],
+)
+def test_invalid_web(data: dict[str, Any], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config({"sensors": [_sensor()]} | data, environ={})
