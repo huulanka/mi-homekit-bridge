@@ -23,7 +23,7 @@ from .config import BluetoothConfig, BridgeConfig, ScanningMode, SensorConfig
 from .decoder import Reading, SensorDecoder
 from .history import Event, HistoryStore, Sample, SensorInfo
 from .homekit import ThermometerAccessory, create_bridge, create_driver
-from .scanner import ServiceInfoCallback, create_scanner
+from .scanner import ServiceInfoCallback, common_address_prefix, create_scanner
 from .status import BridgeStatus, SensorStatus
 from .system import POLL_SECONDS, SystemMonitor
 from .systemd import clock_synchronized, notify, watchdog_interval
@@ -63,15 +63,27 @@ class ScannerFactory:
     passive scanning does not work on this system."""
 
     def __init__(
-        self, callback: ServiceInfoCallback, bluetooth: BluetoothConfig, events: EventLog
+        self,
+        callback: ServiceInfoCallback,
+        bluetooth: BluetoothConfig,
+        events: EventLog,
+        *,
+        address_prefix: str | None = None,
     ) -> None:
         self._callback = callback
         self._adapter = bluetooth.adapter
         self._events = events
         self.mode: ScanningMode = bluetooth.scanning_mode
+        self.address_prefix = address_prefix
+        """Active scans only report devices whose address starts with this."""
 
     def __call__(self) -> BleakScanner:
-        return create_scanner(self._callback, adapter=self._adapter, scanning_mode=self.mode)
+        return create_scanner(
+            self._callback,
+            adapter=self._adapter,
+            scanning_mode=self.mode,
+            address_prefix=self.address_prefix,
+        )
 
     def fall_back(self, reason: str) -> bool:
         if self.mode != "passive":
@@ -407,7 +419,12 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
             supervisor.advertisement_seen(now)
             app.handle_advertisement(info, now)
 
-        factory = ScannerFactory(on_advertisement, config.bluetooth, events)
+        factory = ScannerFactory(
+            on_advertisement,
+            config.bluetooth,
+            events,
+            address_prefix=common_address_prefix(sensor.mac for sensor in config.sensors),
+        )
         supervisor = ScanSupervisor(
             factory,
             state_dir=state_dir,
@@ -447,11 +464,14 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
         stack.push_async_callback(supervisor.stop)
         events("started", version=__version__)
         _LOGGER.info(
-            "Bridge '%s' running with %d sensor(s), %s Bluetooth scan on %s",
+            "Bridge '%s' running with %d sensor(s), %s Bluetooth scan on %s%s",
             config.name,
             len(app.channels),
             config.bluetooth.scanning_mode,
             config.bluetooth.adapter,
+            f" for addresses {factory.address_prefix}*"
+            if factory.address_prefix and factory.mode == "active"
+            else "",
         )
         notify("READY=1", f"STATUS={app.status_line(supervisor)}")
 

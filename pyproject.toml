@@ -1,6 +1,6 @@
 [project]
 name = "mi-homekit-bridge"
-version = "0.5.1"
+version = "0.5.2"
 description = "Tiny bridge that exposes Xiaomi LYWSD03MMC and BTHome BLE thermometers to Apple HomeKit"
 readme = "README.md"
 license = "MIT"

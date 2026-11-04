@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from pyhap.accessory_driver import AccessoryDriver
 
+from mi_homekit_bridge import app as app_module
 from mi_homekit_bridge.app import (
     WEATHER_SENSOR_ID,
     BridgeApp,
@@ -20,6 +21,7 @@ from mi_homekit_bridge.bluetooth import ScanState, ScanSupervisor
 from mi_homekit_bridge.config import BluetoothConfig, BridgeConfig, SensorConfig, WeatherConfig
 from mi_homekit_bridge.history import HistoryStore, Sample, SensorInfo
 from mi_homekit_bridge.homekit import aid_for_mac, create_driver, load_or_create_setup
+from mi_homekit_bridge.scanner import common_address_prefix
 from mi_homekit_bridge.weather import Observation, WeatherError
 
 from .helpers import (
@@ -310,6 +312,36 @@ def test_scanner_factory_never_falls_back_from_active(store: HistoryStore) -> No
     factory = ScannerFactory(lambda _info: None, BluetoothConfig(), EventLog(store))
     assert not factory.fall_back("whatever")
     assert store.events() == []
+
+
+def test_scanner_factory_passes_the_address_prefix(
+    store: HistoryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        app_module, "create_scanner", lambda _callback, **kwargs: created.append(kwargs)
+    )
+    factory = ScannerFactory(
+        lambda _info: None, BluetoothConfig(), EventLog(store), address_prefix="A4:C1:38:"
+    )
+    factory()
+    assert created == [
+        {"adapter": "hci0", "scanning_mode": "active", "address_prefix": "A4:C1:38:"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("addresses", "expected"),
+    [
+        ([TEST_MAC, OTHER_MAC], "A4:C1:38:00:00:0"),
+        (["A4:C1:38:CE:C7:B6", "A4:C1:38:F7:FC:6A"], "A4:C1:38:"),
+        (["a4:c1:38:ce:c7:b6"], "A4:C1:38:CE:C7:B6"),
+        (["A4:C1:38:CE:C7:B6", "54:EF:44:00:00:01"], None),
+        ([], None),
+    ],
+)
+def test_common_address_prefix(addresses: list[str], expected: str | None) -> None:
+    assert common_address_prefix(addresses) == expected
 
 
 async def test_air_quality_follows_the_mould_risk(tmp_path: Path) -> None:
