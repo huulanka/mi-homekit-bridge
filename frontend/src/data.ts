@@ -1,5 +1,5 @@
 // Pure data transformations for the charts (unit-tested in data.test.ts).
-import { pick, type Heatmap, type Metric, type Profile, type Series } from './api'
+import { pick, type Heatmap, type Metric, type OutdoorDay, type Profile, type RoomDay, type Series } from './api'
 
 export const HOURS = Array.from({ length: 24 }, (_, hour) => hour)
 
@@ -55,9 +55,13 @@ export function computeDeltas(data: Series, metric: Metric): DeltaSeries[] {
     })
 }
 
+function choose(metric: Metric, temperature: number | null, humidity: number | null, absolute: number | null) {
+  return metric === 'temperature' ? temperature : metric === 'humidity' ? humidity : absolute
+}
+
 /** 24 values per sensor (null for hours without samples). */
 export function profileValues(points: Profile['sensors'][number]['points'], metric: Metric): (number | null)[] {
-  const byHour = new Map(points.map(([hour, temperature, humidity]) => [hour, metric === 'temperature' ? temperature : humidity]))
+  const byHour = new Map(points.map(([hour, temperature, humidity, , absolute]) => [hour, choose(metric, temperature, humidity, absolute ?? null)]))
   return HOURS.map((hour) => byHour.get(hour) ?? null)
 }
 
@@ -66,8 +70,23 @@ export function heatmapCells(sensor: Heatmap['sensors'][number], metric: Metric)
   const days = [...new Set(sensor.cells.map((c) => c[0]))].sort()
   const index = new Map(days.map((day, i) => [day, i]))
   const cells = sensor.cells
-    .map(([day, hour, temperature, humidity]) => [index.get(day)!, hour, metric === 'temperature' ? temperature : humidity] as const)
+    .map(([day, hour, temperature, humidity, absolute]) => [index.get(day)!, hour, choose(metric, temperature, humidity, absolute ?? null)] as const)
     .filter((c): c is readonly [number, number, number] => c[2] !== null)
   const values = cells.map((c) => c[2])
   return { days, cells, min: values.length ? Math.min(...values) : 0, max: values.length ? Math.max(...values) : 1 }
+}
+
+/** Indoor sensors with at least one wall humidity value. */
+export function mouldSensors(data: Series) {
+  return data.sensors.filter((s) => s.kind === 'ble' && s.surface?.some(([, v]) => v !== null))
+}
+
+/** Whether the outdoor sensor has any sun, wind or precipitation values. */
+export function hasWeather(data: Series): boolean {
+  return data.sensors.some((s) => s.weather?.some((row) => row[1] !== null || row[2] !== null || row[3] !== null))
+}
+
+/** Daily mean of a metric. */
+export function dayValue(day: RoomDay | OutdoorDay, metric: Metric): number | null {
+  return metric === 'temperature' ? day.temperature_avg : metric === 'humidity' ? day.humidity_avg : day.absolute_avg
 }

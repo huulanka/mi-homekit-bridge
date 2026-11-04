@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { BridgeEvent } from '../api'
-import { describeEvent, eventSeverity } from '../events'
+import { describeEvent, eventSeverity, groupEvents } from '../events'
 import { formatDateTime } from '../format'
 import { t } from '../i18n'
 import { DotIcon } from './Icons'
@@ -8,7 +8,8 @@ import { SeverityIcon } from './Severity'
 
 const COLLAPSED = 6
 
-export function EventsCard({ events, names }: { events: BridgeEvent[]; names: Record<string, string> }) {
+export function EventsCard({ events: raw, names }: { events: BridgeEvent[]; names: Record<string, string> }) {
+  const events = groupEvents(raw)
   const [expanded, setExpanded] = useState(false)
   const shown = expanded ? events : events.slice(0, COLLAPSED)
   return (

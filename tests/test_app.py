@@ -310,3 +310,45 @@ def test_scanner_factory_never_falls_back_from_active(store: HistoryStore) -> No
     factory = ScannerFactory(lambda _info: None, BluetoothConfig(), EventLog(store))
     assert not factory.fall_back("whatever")
     assert store.events() == []
+
+
+async def test_air_quality_follows_the_mould_risk(tmp_path: Path) -> None:
+    config = replace(
+        CONFIG,
+        weather=WeatherConfig(enabled=True, latitude=49.0, longitude=12.1),
+        sensors=(
+            SensorConfig(name="Living Room", mac=TEST_MAC, bindkey=TEST_BINDKEY),
+            SensorConfig(name="Bedroom", mac=OTHER_MAC, bindkey=TEST_BINDKEY, surface_factor=0.8),
+        ),
+    )
+    driver = create_driver(config, tmp_path, asyncio.get_running_loop())
+    app = BridgeApp(config, driver)
+    living, bedroom = (app.channels[m] for m in (TEST_MAC, OTHER_MAC))
+    assert living.accessory.air_quality == 0  # unknown until there is data
+    for channel in (living, bedroom):
+        channel.temperature, channel.humidity, channel.stale = 22.2, 61.0, False
+
+    app.outdoor = Sample(WEATHER_SENSOR_ID, 1000, 5.6, 71.0)
+    app.update_air_quality(wall=1000 + 600)
+    # Coldest wall: 83 % with the standard factor (inferior), 75 % with 0.8 (fair).
+    assert (living.accessory.air_quality, bedroom.accessory.air_quality) == (4, 3)
+
+    app.update_air_quality(wall=1000 + 4 * 3600)  # outdoor value too old
+    assert living.accessory.air_quality == 0
+
+
+async def test_no_air_quality_without_weather(driver: AccessoryDriver) -> None:
+    app = BridgeApp(CONFIG, driver)
+    assert app.channels[TEST_MAC].accessory.air_quality is None
+    app.update_air_quality(wall=0)  # harmless
+
+
+async def test_fetch_weather_stores_extra_values(tmp_path: Path) -> None:
+    store = HistoryStore(tmp_path / "h.db")
+    store.upsert_sensors([SensorInfo(WEATHER_SENSOR_ID, "Outdoor", "weather")])
+    observation = Observation(900, 4.5, 80.0, radiation=210.0, wind=12.0, precipitation=0.8)
+    sample = await _fetch_weather(FakeProvider(observation), store)
+    assert sample == store.latest_full(WEATHER_SENSOR_ID)
+    assert sample is not None
+    assert (sample.radiation, sample.wind, sample.precipitation) == (210.0, 12.0, 0.8)
+    store.close()

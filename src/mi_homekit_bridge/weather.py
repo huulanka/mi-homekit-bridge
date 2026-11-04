@@ -1,4 +1,4 @@
-"""Outdoor temperature and humidity from a weather service.
+"""Outdoor conditions from a weather service.
 
 Providers implement :class:`WeatherProvider`. The only provider so far is
 `Open-Meteo <https://open-meteo.com>`_: free for non-commercial use, no API key,
@@ -46,6 +46,12 @@ class Observation:
     """Observation time, UTC epoch seconds."""
     temperature: float | None
     humidity: float | None
+    radiation: float | None = None
+    """Global (shortwave) solar radiation, W/m²."""
+    wind: float | None = None
+    """Wind speed at 10 m, km/h."""
+    precipitation: float | None = None
+    """Precipitation rate, mm/h."""
 
 
 class WeatherProvider(Protocol):
@@ -65,19 +71,36 @@ def parse_nominatim(data: Any, postal_code: str, country: str) -> Location:
     return Location(latitude, longitude, f"{postal_code} {place}".strip())
 
 
+def _number(block: dict[str, Any], key: str) -> float | None:
+    value = block.get(key)
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
 def parse_current(data: dict[str, Any]) -> Observation:
-    """Parse the ``current`` block of an Open-Meteo forecast response (timezone=GMT)."""
+    """Parse the ``current`` block of an Open-Meteo forecast response (timezone=GMT).
+
+    Precipitation there is the amount of the last ``interval`` seconds (15 minutes);
+    it is stored as a rate, so it does not depend on how often we ask.
+    """
     current = data.get("current")
     if not isinstance(current, dict) or "time" not in current:
         raise WeatherError("response has no current weather")
     observed = datetime.fromisoformat(str(current["time"])).replace(tzinfo=UTC)
-    temperature = current.get("temperature_2m")
-    humidity = current.get("relative_humidity_2m")
+    interval = _number(current, "interval") or 900.0
+    precipitation = _number(current, "precipitation")
     return Observation(
         ts=int(observed.timestamp()),
-        temperature=float(temperature) if temperature is not None else None,
-        humidity=float(humidity) if humidity is not None else None,
+        temperature=_number(current, "temperature_2m"),
+        humidity=_number(current, "relative_humidity_2m"),
+        radiation=_number(current, "shortwave_radiation"),
+        wind=_number(current, "wind_speed_10m"),
+        precipitation=None if precipitation is None else precipitation * 3600 / interval,
     )
+
+
+CURRENT_VARIABLES = (
+    "temperature_2m,relative_humidity_2m,shortwave_radiation,wind_speed_10m,precipitation"
+)
 
 
 class OpenMeteo:
@@ -137,7 +160,7 @@ class OpenMeteo:
             {
                 "latitude": f"{location.latitude:.4f}",
                 "longitude": f"{location.longitude:.4f}",
-                "current": "temperature_2m,relative_humidity_2m",
+                "current": CURRENT_VARIABLES,
                 "timezone": "GMT",
             },
         )

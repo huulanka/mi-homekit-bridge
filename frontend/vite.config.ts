@@ -9,7 +9,7 @@ export default defineConfig({
   build: {
     outDir: '../src/mi_homekit_bridge/static',
     emptyOutDir: true,
-    chunkSizeWarningLimit: 900,
+    chunkSizeWarningLimit: 1000,
   },
   server: {
     proxy: { '/api': 'http://127.0.0.1:8080' },

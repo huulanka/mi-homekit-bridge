@@ -47,6 +47,24 @@ def test_parse_current() -> None:
     assert (observation.temperature, observation.humidity) == (3.9, 81.0)
 
 
+def test_parse_current_with_radiation_wind_and_precipitation() -> None:
+    data = {
+        "current": {
+            "time": "2026-11-04T10:00",
+            "interval": 900,
+            "temperature_2m": 7.2,
+            "relative_humidity_2m": 69,
+            "shortwave_radiation": 336.0,
+            "wind_speed_10m": 13.4,
+            "precipitation": 0.3,
+        }
+    }
+    observation = parse_current(data)
+    assert (observation.radiation, observation.wind) == (336.0, 13.4)
+    assert observation.precipitation == pytest.approx(1.2)  # 0.3 mm in 15 minutes = 1.2 mm/h
+    assert parse_current(CURRENT).precipitation is None
+
+
 def test_parse_current_rejects_garbage() -> None:
     with pytest.raises(WeatherError):
         parse_current({"error": True})

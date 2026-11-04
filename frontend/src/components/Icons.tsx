@@ -113,3 +113,37 @@ export const TargetIcon = ({ className }: IconProps) => (
     <circle cx="12" cy="12" r="0.6" fill="currentColor" />
   </svg>
 )
+
+export const SunIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...common}>
+    <circle cx="12" cy="12" r="3.8" />
+    <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4" />
+  </svg>
+)
+
+export const WindIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...common}>
+    <path d="M3 9h11.5a2.5 2.5 0 1 0-2.5-2.5M3 13h15.5a2.5 2.5 0 1 1-2.5 2.5M3 17h7" />
+  </svg>
+)
+
+export const RainIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...common}>
+    <path d="M7 15h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 7.1 6.5 4.25 4.25 0 0 0 7 15Z" />
+    <path d="m9 18-1 2M13 18l-1 2M17 18l-1 2" />
+  </svg>
+)
+
+/** An open window with air flowing in: airing. */
+export const AirIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...common}>
+    <rect x="3.5" y="4" width="11" height="16" rx="1.5" />
+    <path d="M9 4v16M17 9.5h3.5M17 13h4.5M17 16.5h3" />
+  </svg>
+)
+
+export const ChevronIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...common}>
+    <path d="m8 10 4 4 4-4" />
+  </svg>
+)

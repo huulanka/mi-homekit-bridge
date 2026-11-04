@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Point, Series } from './api'
 import { computeDeltas, heatmapCells, profileValues, withGaps } from './data'
 
-const point = (ts: number, temperature: number | null, humidity: number | null = null): Point => [
+const point = (ts: number, temperature: number | null, humidity: number | null = null, absolute: number | null = null): Point => [
   ts,
   temperature,
   temperature,
@@ -10,6 +10,9 @@ const point = (ts: number, temperature: number | null, humidity: number | null =
   humidity,
   humidity,
   humidity,
+  absolute,
+  absolute,
+  absolute,
 ]
 
 describe('withGaps', () => {
@@ -28,9 +31,18 @@ describe('computeDeltas', () => {
     start: 0,
     end: 3600,
     sensors: [
-      { id: 'a', name: 'Living', kind: 'ble', target_temperature: null, points: [point(0, 21), point(300, 21.5), point(4000, 22)] },
-      { id: 'w', name: 'Outdoor', kind: 'weather', target_temperature: null, points: [point(0, 5), point(900, 6)] },
+      {
+        id: 'a',
+        name: 'Living',
+        kind: 'ble',
+        target_temperature: null,
+        surface_factor: 0.7,
+        points: [point(0, 21, 50, 9.2), point(300, 21.5), point(4000, 22)],
+      },
+      { id: 'w', name: 'Outdoor', kind: 'weather', target_temperature: null, surface_factor: null, points: [point(0, 5, 80, 5.4), point(900, 6)] },
     ],
+    gaps: [],
+    airings: [],
   }
 
   it('subtracts the latest outdoor value and carries it forward up to 30 minutes', () => {
@@ -43,6 +55,11 @@ describe('computeDeltas', () => {
     ])
   })
 
+  it('compares the water content, not the relative humidity', () => {
+    const [living] = computeDeltas(series, 'absolute')
+    expect(living?.points[0]).toEqual([0, 3.8])
+  })
+
   it('is empty without an outdoor sensor', () => {
     expect(computeDeltas({ ...series, sensors: series.sensors.slice(0, 1) }, 'temperature')).toEqual([])
   })
@@ -50,10 +67,11 @@ describe('computeDeltas', () => {
 
 describe('profileValues', () => {
   it('returns 24 hours with gaps as null', () => {
-    const values = profileValues([[7, 20, 50, 3], [8, 21, 48, 3]], 'humidity')
+    const values = profileValues([[7, 20, 50, 3, 8.6], [8, 21, 48, 3, 8.8]], 'humidity')
     expect(values).toHaveLength(24)
     expect(values[7]).toBe(50)
     expect(values[0]).toBeNull()
+    expect(profileValues([[7, 20, 50, 3, 8.6]], 'absolute')[7]).toBe(8.6)
   })
 })
 
@@ -65,10 +83,11 @@ describe('heatmapCells', () => {
         name: 'Living',
         kind: 'ble',
         target_temperature: null,
+        surface_factor: 0.7,
         cells: [
-          ['2026-11-02', 7, 19, 50],
-          ['2026-11-01', 7, 18, 52],
-          ['2026-11-01', 8, null, 51],
+          ['2026-11-02', 7, 19, 50, 8.2],
+          ['2026-11-01', 7, 18, 52, 8.0],
+          ['2026-11-01', 8, null, 51, null],
         ],
       },
       'temperature',

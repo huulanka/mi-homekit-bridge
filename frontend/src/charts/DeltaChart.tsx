@@ -10,7 +10,8 @@ import type { ChartOption } from './setup'
 
 interface Props {
   data: Series
-  metric: Metric
+  /** Relative humidity is not comparable between inside and outside. */
+  metric: Exclude<Metric, 'humidity'>
   theme: Theme
   colors: Record<string, string>
   dimmed: boolean
@@ -45,7 +46,7 @@ export function DeltaChart({ data, metric, theme, colors, dimmed }: Props) {
       xAxis: timeAxis(theme),
       yAxis: {
         ...valueAxis(theme, 'delta'),
-        axisLabel: { color: theme.muted, formatter: (v: number) => (metric === 'temperature' ? `${v} K` : `${v} pp`) },
+        axisLabel: { color: theme.muted, formatter: (v: number) => (metric === 'temperature' ? `${v} K` : `${v} g/m³`) },
       },
       dataZoom: fineScreen
         ? [{ type: 'inside', zoomOnMouseWheel: 'ctrl', moveOnMouseMove: true, moveOnMouseWheel: false }]

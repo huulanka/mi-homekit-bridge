@@ -17,7 +17,7 @@ from bleak import BleakScanner
 from habluetooth import BluetoothServiceInfoBleak
 from pyhap.accessory_driver import AccessoryDriver
 
-from . import __version__
+from . import __version__, climate
 from .bluetooth import ScanSupervisor
 from .config import BluetoothConfig, BridgeConfig, ScanningMode, SensorConfig
 from .decoder import Reading, SensorDecoder
@@ -25,6 +25,7 @@ from .history import Event, HistoryStore, Sample, SensorInfo
 from .homekit import ThermometerAccessory, create_bridge, create_driver
 from .scanner import ServiceInfoCallback, create_scanner
 from .status import BridgeStatus, SensorStatus
+from .system import POLL_SECONDS, SystemMonitor
 from .systemd import clock_synchronized, notify, watchdog_interval
 from .weather import WeatherError, WeatherProvider, create_provider
 from .web import start_web
@@ -37,6 +38,8 @@ HISTORY_FILENAME = "history.db"
 MIN_FRESH_SECONDS = 300
 """A value is recorded only if it was received within the last history interval,
 but at least within this many seconds."""
+OUTDOOR_MAX_AGE_SECONDS = 3 * 3600
+"""Older outdoor values are not used for the HomeKit air quality."""
 
 
 class EventLog:
@@ -114,7 +117,7 @@ class SensorChannel:
 def sensor_infos(config: BridgeConfig) -> list[SensorInfo]:
     """All sensors to register in the history, including the weather 'sensor'."""
     infos = [
-        SensorInfo(sensor.mac, sensor.name, "ble", sensor.target_temperature)
+        SensorInfo(sensor.mac, sensor.name, "ble", sensor.target_temperature, sensor.surface_factor)
         for sensor in config.sensors
     ]
     if config.weather.enabled:
@@ -139,6 +142,8 @@ class BridgeApp:
         self._stale_after = config.stale_after_minutes * 60.0
         self._fresh_for = max(config.history.interval_minutes * 60, MIN_FRESH_SECONDS)
         _, accessories = create_bridge(driver, config, with_battery)
+        self.outdoor: Sample | None = None
+        """The latest outdoor values (for the air quality)."""
         self.channels: dict[str, SensorChannel] = {
             sensor.mac: SensorChannel(
                 config=sensor,
@@ -190,6 +195,25 @@ class BridgeApp:
                 channel.stale = True
                 channel.accessory.set_fault(True)
 
+    def update_air_quality(self, wall: float) -> None:
+        """Mould risk as HomeKit air quality, from the current indoor and outdoor values."""
+        outdoor = self.outdoor
+        outside = (
+            outdoor.temperature
+            if outdoor is not None and wall - outdoor.ts <= OUTDOOR_MAX_AGE_SECONDS
+            else None
+        )
+        for channel in self.channels.values():
+            surface = None
+            if not channel.stale:
+                surface = climate.surface_humidity(
+                    channel.temperature,
+                    channel.humidity,
+                    outside,
+                    channel.config.surface_factor or climate.DEFAULT_SURFACE_FACTOR,
+                )
+            channel.accessory.set_air_quality(climate.air_quality(surface))
+
     # -- history ---------------------------------------------------------------
 
     def restore(self, latest: Mapping[str, Sample]) -> None:
@@ -231,6 +255,7 @@ class BridgeApp:
         started: float,
         now: float,
         wall: float,
+        system: SystemMonitor | None = None,
     ) -> BridgeStatus:
         """Live status. ``started`` and ``now`` are monotonic, ``wall`` is ``time.time()``."""
 
@@ -260,6 +285,7 @@ class BridgeApp:
                 )
                 for mac, ch in self.channels.items()
             ),
+            system=system.health() if system is not None and system.available else None,
         )
 
     def status_line(self, supervisor: ScanSupervisor) -> str:
@@ -288,17 +314,24 @@ async def _run_aligned(
             _LOGGER.exception("Periodic job %s failed", getattr(job, "__name__", job))
 
 
-async def _fetch_weather(provider: WeatherProvider, store: HistoryStore) -> None:
+async def _fetch_weather(provider: WeatherProvider, store: HistoryStore) -> Sample | None:
     try:
         observation = await provider.current()
     except WeatherError as err:
         _LOGGER.warning("Weather update failed: %s", err)
-        return
+        return None
     sample = Sample(
-        WEATHER_SENSOR_ID, observation.ts, observation.temperature, observation.humidity
+        WEATHER_SENSOR_ID,
+        observation.ts,
+        observation.temperature,
+        observation.humidity,
+        radiation=observation.radiation,
+        wind=observation.wind,
+        precipitation=observation.precipitation,
     )
     await asyncio.to_thread(store.add_samples, [sample])
     _LOGGER.debug("Weather: %s", observation)
+    return sample
 
 
 class Recorder:
@@ -346,6 +379,7 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
     async with contextlib.AsyncExitStack() as stack:
         store: HistoryStore | None = None
         latest: dict[str, Sample] = {}
+        outdoor: Sample | None = None
         if config.history.enabled:
             store = HistoryStore(state_dir / HISTORY_FILENAME)
             stack.callback(store.close)
@@ -354,6 +388,8 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
                 sample = await asyncio.to_thread(store.latest, sensor.mac)
                 if sample is not None:
                     latest[sensor.mac] = sample
+            if config.weather.enabled:
+                outdoor = await asyncio.to_thread(store.latest, WEATHER_SENSOR_ID)
 
         events = EventLog(store)
         app = BridgeApp(
@@ -363,6 +399,8 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
             with_battery=frozenset(m for m, s in latest.items() if s.battery is not None),
         )
         app.restore(latest)
+        app.outdoor = outdoor
+        system = SystemMonitor(events=lambda kind, **data: events(kind, **data))
 
         def on_advertisement(info: BluetoothServiceInfoBleak) -> None:
             now = loop.time()
@@ -384,6 +422,7 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
                 started=started,
                 now=loop.time(),
                 wall=time.time(),
+                system=system,
             )
 
         if store is not None:
@@ -393,7 +432,13 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
                 store.path,
             )
             if config.web.enabled:
-                runner = await start_web(store, config.web.host, config.web.port, status=status)
+                runner = await start_web(
+                    store,
+                    config.web.host,
+                    config.web.port,
+                    status=status,
+                    interval=config.history.interval_minutes * 60,
+                )
                 stack.push_async_callback(runner.cleanup)
 
         await driver.async_start()
@@ -411,6 +456,15 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
         notify("READY=1", f"STATUS={app.status_line(supervisor)}")
 
         background: list[asyncio.Task[None]] = []
+        if system.available:
+
+            async def system_loop() -> None:
+                while not stop.is_set():
+                    system.poll()
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(stop.wait(), timeout=POLL_SECONDS)
+
+            background.append(asyncio.create_task(system_loop()))
         if store is not None:
             recorder = Recorder(app, store, loop.time)
             background.append(
@@ -424,7 +478,10 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
                 history_store = store
 
                 async def weather(_ts: int) -> None:
-                    await _fetch_weather(provider, history_store)
+                    sample = await _fetch_weather(provider, history_store)
+                    if sample is not None:
+                        app.outdoor = sample
+                        app.update_air_quality(time.time())
 
                 async def weather_loop() -> None:
                     try:
@@ -452,6 +509,7 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
                 await supervisor.check(now)
                 if not supervisor.healthy:
                     app.bluetooth_down()
+                app.update_air_quality(time.time())
                 states = [f"STATUS={app.status_line(supervisor)}"]
                 if watchdog is not None:
                     states.append("WATCHDOG=1")

@@ -33,7 +33,7 @@ function Segmented<T extends string>({ label, value, options, labelFor, onChange
 }
 
 export const RANGES = ['24h', '7d', '30d', '1y', 'all'] as const satisfies readonly RangeKey[]
-const METRICS = ['temperature', 'humidity'] as const satisfies readonly Metric[]
+const METRICS = ['temperature', 'humidity', 'absolute'] as const satisfies readonly Metric[]
 
 interface Props {
   range: RangeKey

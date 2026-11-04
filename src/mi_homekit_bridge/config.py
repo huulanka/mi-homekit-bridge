@@ -35,8 +35,8 @@ SCANNING_MODES = ("active", "passive")
 ScanningMode = Literal["active", "passive"]
 
 _TOP_LEVEL_KEYS = {"bridge", "sensors", "bluetooth", "history", "weather", "web"}
-_BRIDGE_KEYS = {"name", "port", "address", "stale_after_minutes"}
-_SENSOR_KEYS = {"name", "mac", "target_temperature"}
+_BRIDGE_KEYS = {"name", "port", "address", "stale_after_minutes", "air_quality"}
+_SENSOR_KEYS = {"name", "mac", "target_temperature", "surface_factor"}
 _BLUETOOTH_KEYS = {"adapter", "scanning_mode"}
 _HISTORY_KEYS = {"enabled", "interval_minutes"}
 _WEB_KEYS = {"enabled", "host", "port"}
@@ -72,6 +72,9 @@ class SensorConfig:
     """
     target_temperature: float | None = None
     """Desired room temperature in °C, shown in the dashboard."""
+    surface_factor: float | None = None
+    """Temperature factor fRsi of the coldest wall spots (DIN 4108-2) for the mould
+    estimate; ``None`` means the standard's minimum of 0.7."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +135,8 @@ class BridgeConfig:
     port: int = DEFAULT_PORT
     address: str | None = None
     stale_after_minutes: int = DEFAULT_STALE_AFTER_MINUTES
+    air_quality: bool = True
+    """Show the mould risk as HomeKit air quality (needs outdoor data)."""
     bluetooth: BluetoothConfig = BluetoothConfig()
     history: HistoryConfig = HistoryConfig()
     weather: WeatherConfig = WeatherConfig()
@@ -310,12 +315,15 @@ def _parse_sensor(raw: Any, index: int, environ: Mapping[str, str]) -> SensorCon
         mac = normalize_mac(_require_str(raw, "mac", where))
         name = _require_str(raw, "name", where)
         target = _float(raw, "target_temperature", 5, 30, where)
+        factor = _float(raw, "surface_factor", 0.5, 0.95, where)
         env_var = bindkey_env_var(mac)
         try:
             bindkey = parse_bindkey(environ.get(env_var, ""))
         except ConfigError as err:
             raise ConfigError(f"${env_var}: {err}") from err
-        return SensorConfig(name=name, mac=mac, bindkey=bindkey, target_temperature=target)
+        return SensorConfig(
+            name=name, mac=mac, bindkey=bindkey, target_temperature=target, surface_factor=factor
+        )
     except ConfigError as err:
         if str(err).startswith(where):
             raise
@@ -348,6 +356,8 @@ def parse_config(data: dict[str, Any], environ: Mapping[str, str] | None = None)
     if not isinstance(stale, int) or isinstance(stale, bool) or stale < 1:
         raise ConfigError("[bridge]: 'stale_after_minutes' must be a positive integer")
 
+    air_quality = _bool(bridge, "air_quality", True, "[bridge]")
+
     raw_sensors = data.get("sensors", [])
     if not isinstance(raw_sensors, list) or not raw_sensors:
         raise ConfigError("at least one [[sensors]] entry is required")
@@ -378,6 +388,7 @@ def parse_config(data: dict[str, Any], environ: Mapping[str, str] | None = None)
         port=port,
         address=address.strip() if address else None,
         stale_after_minutes=stale,
+        air_quality=air_quality,
         bluetooth=bluetooth,
         history=history,
         weather=weather,

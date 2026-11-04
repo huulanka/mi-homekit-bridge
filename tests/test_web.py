@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from mi_homekit_bridge.climate import water_content
 from mi_homekit_bridge.history import Event, HistoryStore, Sample, SensorInfo
 from mi_homekit_bridge.status import BridgeStatus, SensorStatus
 from mi_homekit_bridge.web import create_app, dew_point
@@ -58,10 +59,21 @@ async def test_overview(client: TestClient) -> None:  # type: ignore[type-arg]
     living = sensors["A"]
     assert living["kind"] == "ble"
     assert living["latest"]["temperature"] == pytest.approx(22.1)
-    assert living["latest"]["battery"] == 90
+    assert living["battery"] == {"ts": NOW - 300, "level": 90}
     assert living["latest"]["dew_point"] is not None
+    assert living["latest"]["absolute_humidity"] == pytest.approx(water_content(22.1, 50), abs=0.1)
     assert len(living["spark"]) >= 2
-    assert sensors["weather"]["latest"]["temperature"] == 4.0
+    assert living["surface_factor"] == 0.7
+    # 22.1 °C / 50 % inside, 4 °C outside: about 70 % at the coldest wall.
+    air = living["air"]
+    assert air["surface_humidity"] == pytest.approx(70, abs=1)
+    assert (air["level"], air["basis"]) == ("warning", "surface")
+    assert (air["ventilation"], air["minutes"]) == ("recommended", 5)
+    assert living["airings"] == {"today": 0, "last": None}
+    outdoor = sensors["weather"]
+    assert outdoor["latest"]["temperature"] == 4.0
+    assert outdoor["air"] is None
+    assert outdoor["battery"] is None
     assert data["first_ts"] == NOW - 3600
 
 
@@ -70,8 +82,16 @@ async def test_series(client: TestClient) -> None:  # type: ignore[type-arg]
     assert data["bucket"] == 300
     living = next(s for s in data["sensors"] if s["id"] == "A")
     assert len(living["points"]) == 12
-    _ts, t_min, t_avg, t_max, _h_min, h_avg, _h_max = living["points"][0]
+    _ts, t_min, t_avg, t_max, _h_min, h_avg, _h_max, _a_min, a_avg, _a_max = living["points"][0]
     assert (t_min, t_avg, t_max, h_avg) == (21.0, 21.0, 21.0, 50.0)
+    assert a_avg == pytest.approx(water_content(21.0, 50.0), abs=0.01)
+    surface = dict(living["surface"])
+    assert surface[NOW - 3600] is None  # no outdoor value yet
+    assert surface[NOW - 300] == pytest.approx(70, abs=1)
+    outdoor = next(s for s in data["sensors"] if s["id"] == "weather")
+    assert outdoor["weather"] == [[NOW - 900, None, None, None]]
+    assert data["gaps"] == []
+    assert data["airings"] == []
 
     yearly = await (await client.get("/api/series?range=1y")).json()
     assert yearly["bucket"] == "day"
@@ -87,7 +107,7 @@ async def test_profile_and_heatmap(client: TestClient) -> None:  # type: ignore[
 
     heatmap = await (await client.get("/api/heatmap?days=14")).json()
     living = next(s for s in heatmap["sensors"] if s["id"] == "A")
-    assert all(len(cell) == 4 for cell in living["cells"])
+    assert all(len(cell) == 5 for cell in living["cells"])
 
 
 @pytest.mark.parametrize(
@@ -104,7 +124,10 @@ async def test_export_csv(client: TestClient) -> None:  # type: ignore[type-arg]
     assert response.status == 200
     assert "attachment" in response.headers["Content-Disposition"]
     lines = (await response.text()).strip().splitlines()
-    assert lines[0] == "time,sensor,temperature_c,humidity_percent,battery_percent"
+    assert lines[0] == (
+        "time,sensor,temperature_c,humidity_percent,battery_percent,"
+        "radiation_w_m2,wind_kmh,precipitation_mm_h"
+    )
     assert len(lines) == 1 + 13
 
 
@@ -217,15 +240,64 @@ async def test_events(client: TestClient, store: HistoryStore) -> None:  # type:
     ]
 
 
-async def test_overview_has_target_and_humidity_share(
+async def test_overview_has_target_and_mould_share(
     client: TestClient,  # type: ignore[type-arg]
     store: HistoryStore,
 ) -> None:
-    store.upsert_sensors([SensorInfo("A", "Living Room", "ble", 20.0)])
-    store.add_samples([Sample("A", NOW - 7200 + i * 300, 21.0, 62.0) for i in range(6)])
+    store.upsert_sensors([SensorInfo("A", "Living Room", "ble", 20.0, 0.8)])
+    # Two hours earlier, without outdoor data: judged by the room humidity (> 70 %).
+    store.add_samples([Sample("A", NOW - 7200 + i * 300, 21.0, 72.0) for i in range(6)])
     sensors = {s["id"]: s for s in (await (await client.get("/api/overview")).json())["sensors"]}
     assert sensors["A"]["target_temperature"] == 20.0
-    humid = sensors["A"]["humid"]
-    assert humid["threshold"] == 60.0
-    assert humid["share"] == pytest.approx(6 / 18, abs=0.001)  # 12 fixture samples at 50 %
-    assert sensors["weather"]["humid"] is None
+    assert sensors["A"]["surface_factor"] == 0.8
+    mould = sensors["A"]["mould"]
+    assert (mould["basis"], mould["threshold"]) == ("room", 70.0)
+    assert mould["share"] == pytest.approx(6 / 18, abs=0.001)
+    assert mould["hours"] == 3
+    assert sensors["weather"]["mould"] is None
+
+
+async def test_series_marks_gaps_and_airings(
+    client: TestClient,  # type: ignore[type-arg]
+    store: HistoryStore,
+) -> None:
+    # Window opened two hours ago: -3 K and much drier within ten minutes.
+    base = NOW - 3 * 3600
+    store.add_samples(
+        [Sample("A", base + i * 300, 22.0, 55.0) for i in range(6)]
+        + [Sample("A", base + 1800, 19.0, 45.0), Sample("A", base + 2100, 19.5, 47.0)]
+        + [Sample("A", base + 2100 + i * 300, 20.0 + i * 0.3, 50.0) for i in range(1, 7)]
+    )
+    store.add_event(Event(base + 4500, "bluetooth_reset", data={"error": "x"}))
+    data = await (await client.get("/api/series?range=24h")).json()
+    [airing] = data["airings"]
+    assert airing["sensor_id"] == "A"
+    assert (airing["start"], airing["lowest"]) == (base + 1500, base + 1800)
+    assert airing["drop"] == 3.0
+    assert airing["recovery_minutes"] == 35  # back above 21.4 °C (within 20 % of the drop)
+    # Nothing recorded between the last airing sample and the fixture (one hour ago).
+    assert data["gaps"] == [[base + 3900, NOW - 3600, "bluetooth"]]
+
+
+async def test_daily(client: TestClient, store: HistoryStore) -> None:  # type: ignore[type-arg]
+    store.upsert_sensors([SensorInfo("A", "Living Room", "ble", 21.5)])
+    data = await (await client.get("/api/daily?days=15")).json()
+    assert data["days"] == 15
+    sensors = {s["id"]: s for s in data["sensors"]}
+    [today] = sensors["A"]["days"]
+    assert today["samples"] == 12
+    assert today["temperature_avg"] == pytest.approx(21.55)
+    # 21.0 to 22.1 °C against 21.5 ± 0.5 °C: only 22.1 °C is too warm.
+    assert (today["cold"], today["on_target"], today["warm"]) == (
+        0,
+        pytest.approx(11 / 12, abs=0.001),
+        pytest.approx(1 / 12, abs=0.001),
+    )
+    [outdoor] = sensors["weather"]["days"]
+    assert outdoor["heating_degrees"] == 16.0
+    assert (await client.get("/api/daily?days=7")).status == 400
+
+    # Past days are cached, today is recomputed.
+    store.add_samples([Sample("A", NOW - 60, 30.0, 50.0)])
+    again = await (await client.get("/api/daily?days=15")).json()
+    assert next(s for s in again["sensors"] if s["id"] == "A")["days"][0]["samples"] == 13
