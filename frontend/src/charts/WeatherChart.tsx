@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import type { Series } from '../api'
-import { stepMs, withGaps } from '../data'
+import { lineStep, stepMs, withGaps } from '../data'
 import { formatDate, formatDateTime, formatNumber } from '../format'
 import { t } from '../i18n'
 import type { Theme } from '../theme'
@@ -23,8 +23,8 @@ interface Props {
 function Panel({ data, kind, theme, color, dimmed }: Props & { kind: Kind }) {
   const option = useMemo((): ChartOption => {
     const weather = data.sensors.find((s) => s.kind === 'weather')?.weather ?? []
-    const step = stepMs(data.bucket)
     const values = weather.map((row) => [row[0] * 1000, row[COLUMN[kind]]] as [number, number | null])
+    const step = lineStep(values.map(([ts]) => ts), stepMs(data.bucket))
     const base = baseOption(theme)
     const unit = UNIT[kind]
     return {
