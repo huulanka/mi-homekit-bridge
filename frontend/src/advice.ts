@@ -4,43 +4,46 @@ import type { HumidShare, OverviewSensor, Status } from './api'
 /** Within this many kelvin of the target counts as "on target". */
 export const TARGET_TOLERANCE = 0.5
 
-/** Rule of thumb for radiator thermostat dials (numbers 1-5): 1 is about 12 °C and
- * every number adds about 4 °C, so 3 is about 20 °C. Real heads vary by ±1-2 °C. */
-const DIAL_ONE = 12
-const KELVIN_PER_STEP = 4
-const DIAL_MIN = 1
-const DIAL_MAX = 5
-
 /** Above this outdoor temperature the heating is usually off ("Heizgrenze"), so
  * turning the thermostat would not change anything. */
 export const HEATING_LIMIT = 15
 
-/** Minimum number of 30-minute buckets for a meaningful 24-hour average. */
-const MIN_BUCKETS = 6
+/** The advice is based on the median of the last 3 hours (six 30-minute buckets):
+ * airing for a few minutes barely moves it, and a turned thermostat shows within
+ * hours (a 24-hour average would keep asking for more for a whole day). */
+const RECENT_BUCKETS = 6
+const MIN_RECENT = 4
+
+/** Rule of thumb for radiator thermostat dials: each mark between the numbers is
+ * about 1 °C. Dials differ, so the advice stays relative: no absolute setting. */
+const KELVIN_PER_MARK = 1
 
 export interface TargetAdvice {
   target: number
-  /** Current value minus target (K). */
-  now: number | null
-  /** 24-hour average minus target (K); the basis of the advice. */
-  average: number | null
+  /** Recent temperature minus target (K), or null without data. */
+  deviation: number | null
   status: 'ok' | 'warm' | 'cold' | 'unknown'
-  /** Suggested change on the dial in steps, rounded to quarter steps: negative = turn
-   * down. Null when no change is advised (on target, no data or heating season over). */
-  steps: number | null
-  /** Dial setting for the target by the rule of thumb, in half steps. */
-  dial: number
+  /** Marks to turn the dial, negative = down. Null when no change is advised
+   * (on target, too little data, or outside the heating season). */
+  marks: number | null
+  /** Too warm, but it is warm outside: the heating is probably off anyway. */
+  heatingOff: boolean
 }
 
-export function dialFor(target: number): number {
-  const raw = DIAL_MIN + (target - DIAL_ONE) / KELVIN_PER_STEP
-  return Math.min(DIAL_MAX, Math.max(DIAL_MIN, Math.round(raw * 2) / 2))
+export function median(values: number[]): number | null {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2
 }
 
-export function average(values: (number | null)[]): number | null {
-  const numbers = values.filter((v): v is number => v !== null)
-  if (numbers.length < MIN_BUCKETS) return null
-  return numbers.reduce((a, b) => a + b, 0) / numbers.length
+/** Median temperature of the last 3 hours, or null with too few buckets. */
+export function recentTemperature(spark: OverviewSensor['spark']): number | null {
+  const values = spark
+    .slice(-RECENT_BUCKETS)
+    .map((s) => s[1])
+    .filter((v): v is number => v !== null)
+  return values.length >= MIN_RECENT ? median(values) : null
 }
 
 export function targetAdvice(
@@ -50,24 +53,20 @@ export function targetAdvice(
 ): TargetAdvice | null {
   const target = sensor.target_temperature
   if (target === null || sensor.kind !== 'ble') return null
-  const current = sensor.latest?.temperature ?? null
-  const mean = average(sensor.spark.map((s) => s[1]))
-  const basis = mean ?? current
-  const offset = current === null ? null : round1(current - target)
-  const avg = mean === null ? null : round1(mean - target)
-  const dial = dialFor(target)
-  if (basis === null) return { target, now: offset, average: avg, status: 'unknown', steps: null, dial }
+  const recent = recentTemperature(sensor.spark)
+  const basis = recent ?? sensor.latest?.temperature ?? null
+  if (basis === null) return { target, deviation: null, status: 'unknown', marks: null, heatingOff: false }
 
-  const deviation = basis - target
+  const deviation = Math.round((basis - target) * 10) / 10
   const status = Math.abs(deviation) <= TARGET_TOLERANCE ? 'ok' : deviation > 0 ? 'warm' : 'cold'
   const outside = freshOutdoorTemperature(outdoor, now)
-  const heating = outside === null || outside < HEATING_LIMIT
-  let steps: number | null = null
-  if (status !== 'ok' && heating && mean !== null) {
-    const quarter = Math.max(1, Math.round((Math.abs(deviation) / KELVIN_PER_STEP) * 4))
-    steps = (deviation > 0 ? -quarter : quarter) / 4
+  const heatingOff = status === 'warm' && outside !== null && outside >= HEATING_LIMIT
+  let marks: number | null = null
+  if (status !== 'ok' && !heatingOff && recent !== null) {
+    const count = Math.max(1, Math.round(Math.abs(deviation) / KELVIN_PER_MARK))
+    marks = deviation > 0 ? -count : count
   }
-  return { target, now: offset, average: avg, status, steps, dial }
+  return { target, deviation, status, marks, heatingOff }
 }
 
 export type Severity = 'good' | 'warning' | 'critical'
@@ -115,8 +114,4 @@ export function banners(status: Status | undefined, offlineSince: number | null)
     if (!status.homekit.paired) result.push({ kind: 'homekit', severity: 'warning', since: null })
   }
   return result
-}
-
-function round1(value: number): number {
-  return Math.round(value * 10) / 10
 }

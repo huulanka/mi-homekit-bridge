@@ -15,6 +15,10 @@ Restarting the scan does not help in that state, only resetting the controller d
    controller as root (``mi-homekit-bridge reset-bluetooth``) before it is
    restarted. At most one reset is requested per :attr:`Timings.reset_cooldown`;
    in between the supervisor keeps retrying on its own.
+
+If nothing has been received at all since the start, a ``fallback`` gets the chance
+to change the configuration first (passive scanning may start fine on systems
+that do not support it, and then deliver nothing): a reset cannot fix that.
 """
 
 from __future__ import annotations
@@ -68,6 +72,10 @@ class Timings:
     """No advertisement from any device for this long means the scan is dead."""
     confirm: float = 60.0
     """After a restart, an advertisement has to arrive within this time."""
+    first_advertisement: float = 120.0
+    """After the very first start, an advertisement has to arrive within this time
+    (longer than ``confirm``: right after a controller reset bluetoothd needs a
+    while to set the adapter up)."""
     retry_delays: tuple[float, ...] = (10.0, 30.0, 60.0, 120.0, 300.0)
     """Delays between attempts while recovering; the last one repeats."""
     escalate_after: int = 3
@@ -80,6 +88,11 @@ DEFAULT_TIMINGS = Timings()
 
 Listener = Callable[[str, dict[str, object]], None]
 """Called with an event kind and its parameters, e.g. to record it in the history."""
+
+Fallback = Callable[[str], bool]
+"""Called with the reason when nothing works since the start. Returns ``True`` if it
+changed how scanners are created (e.g. passive -> active), so trying again makes
+sense right away."""
 
 
 class ScanSupervisor:
@@ -97,9 +110,11 @@ class ScanSupervisor:
         state_dir: Path | None = None,
         timings: Timings = DEFAULT_TIMINGS,
         listener: Listener | None = None,
+        fallback: Fallback | None = None,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._factory = factory
+        self._fallback = fallback
         self._timings = timings
         self._marker = state_dir / RESET_MARKER if state_dir is not None else None
         self._listener = listener
@@ -138,7 +153,7 @@ class ScanSupervisor:
     async def start(self, now: float) -> None:
         """Start scanning. Failures are not raised but retried by :meth:`check`."""
         self.since = self._trouble_since = now
-        if await self._try_start(now):
+        if await self._try_start(now) or await self._fallback_start(now):
             self._set_state(ScanState.RUNNING, now)
         else:
             self._failed_attempt(now, emit="scan_failed")
@@ -147,8 +162,17 @@ class ScanSupervisor:
         """Call periodically. May raise :class:`ControllerResetRequired`."""
         if self.state is ScanState.RUNNING:
             quiet_since = max(self.last_advertisement or 0.0, self._started_at)
-            if now - quiet_since < self._timings.silence:
+            limit = (
+                self._timings.silence
+                if self.last_advertisement is not None
+                else self._timings.first_advertisement
+            )
+            if now - quiet_since < limit:
                 return
+            if self.last_advertisement is None:
+                self.last_error = "nothing was received since the start"
+                if await self._fallback_start(now):
+                    return
             minutes = round((now - quiet_since) / 60)
             _LOGGER.warning("No Bluetooth advertisements for %d minutes, restarting scan", minutes)
             self.last_error = f"no advertisements for {minutes} minutes"
@@ -164,7 +188,8 @@ class ScanSupervisor:
             self.last_error = "scan started but nothing was received"
             _LOGGER.warning("Bluetooth scan started but nothing was received")
             await self._stop_scanner()
-            self._failed_attempt(now)
+            if not await self._fallback_start(now):
+                self._failed_attempt(now)
             return
 
         if now >= self._next_attempt:
@@ -176,8 +201,17 @@ class ScanSupervisor:
     # -- internals -------------------------------------------------------------
 
     async def _attempt(self, now: float) -> None:
-        if not await self._try_start(now):
+        if not (await self._try_start(now) or await self._fallback_start(now)):
             self._failed_attempt(now)
+
+    async def _fallback_start(self, now: float) -> bool:
+        """Let the fallback change the configuration and start again, but only as
+        long as nothing has been received at all since the start."""
+        if self.last_advertisement is not None or self._fallback is None:
+            return False
+        if not self._fallback(self.last_error or "unknown"):
+            return False
+        return await self._try_start(now)
 
     async def _try_start(self, now: float) -> bool:
         await self._stop_scanner()

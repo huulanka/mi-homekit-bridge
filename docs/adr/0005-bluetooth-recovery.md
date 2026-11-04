@@ -56,10 +56,14 @@ Option 4, together with a supervisor inside the bridge:
   accepts an adapter name (`hci[0-9]+`).
 - `Type=notify` with `WatchdogSec=180`: systemd also restarts the bridge if it
   hangs instead of crashing.
-- `[bluetooth] scanning_mode = "passive"` is offered to reduce traffic on the UART
-  link: BlueZ advertisement monitors with patterns for MiBeacon and BTHome service
-  data, so only supported sensors are forwarded at all. It stays opt-in because it
-  needs BlueZ 5.56+ and kernel support, which not every system has.
+- `[bluetooth] scanning_mode = "passive"` is offered to reduce radio and UART
+  traffic: BlueZ advertisement monitors with patterns for MiBeacon and BTHome
+  service data. It stays opt-in: it needs `bluetoothd --experimental`, and on the
+  Raspberry Pi 3 (BlueZ 5.82, no monitor offloading in the controller) it started
+  without an error but BlueZ forwarded nothing at all. A reset cannot fix a mode the
+  system does not support, so as long as nothing has been received since the start
+  the supervisor first asks a fallback to switch to active scanning, and only then
+  counts failures.
 
 ## Consequences
 

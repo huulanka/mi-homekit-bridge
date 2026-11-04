@@ -248,3 +248,72 @@ def test_reset_controller_waits_for_adapter(tmp_path: Path) -> None:
     (device / "bluetooth" / "hci0").rmdir()
     with pytest.raises(ResetError, match="did not come back"):
         reset_controller("hci0", sys_root=tmp_path, timeout=0.0, sleep=lambda _s: None)
+
+
+class SwitchablePlan(Plan):
+    """Passive mode is broken in one of the two ways seen on a Raspberry Pi 3."""
+
+    def __init__(self, passive: str) -> None:
+        super().__init__()
+        self.mode = "passive"
+        self.passive = passive  # "error" or "silent"
+        self.fallbacks: list[str] = []
+
+    def factory(self) -> FakeScanner:
+        plan = self
+
+        class Scanner(FakeScanner):
+            async def start(self) -> None:
+                plan.starts += 1
+                if plan.mode == "passive" and plan.passive == "error":
+                    raise BleakDBusError("x", ["passive scanning on Linux requires BlueZ"])
+                plan.running = True
+
+        return Scanner(self)
+
+    def fall_back(self, reason: str) -> bool:
+        if self.mode != "passive":
+            return False
+        self.fallbacks.append(reason)
+        self.mode = "active"
+        return True
+
+
+async def test_unsupported_passive_mode_falls_back_without_a_reset(tmp_path: Path) -> None:
+    plan = SwitchablePlan("error")
+    sup = ScanSupervisor(plan.factory, state_dir=tmp_path, timings=TIMINGS, fallback=plan.fall_back)
+    await sup.start(0.0)
+    assert state(sup) is ScanState.RUNNING
+    assert plan.mode == "active"
+    assert "passive scanning" in plan.fallbacks[0]
+    assert not (tmp_path / RESET_MARKER).exists()
+
+
+async def test_silent_passive_mode_falls_back_after_the_first_window(tmp_path: Path) -> None:
+    plan, events = SwitchablePlan("silent"), Events()
+    sup = ScanSupervisor(
+        plan.factory,
+        state_dir=tmp_path,
+        timings=TIMINGS,
+        listener=lambda kind, data: events.append((kind, data)),
+        fallback=plan.fall_back,
+    )
+    await sup.start(0.0)
+    await sup.check(100.0)  # within the first-advertisement window (120 s)
+    assert plan.mode == "passive"
+    await sup.check(130.0)
+    assert plan.fallbacks == ["nothing was received since the start"]
+    assert plan.mode == "active"
+    assert state(sup) is ScanState.RUNNING
+    sup.advertisement_seen(131.0)
+    assert events == []  # no outage events, no reset
+
+
+async def test_fallback_is_not_used_once_something_was_received(tmp_path: Path) -> None:
+    plan = SwitchablePlan("silent")
+    sup = ScanSupervisor(plan.factory, state_dir=tmp_path, timings=TIMINGS, fallback=plan.fall_back)
+    await sup.start(0.0)
+    sup.advertisement_seen(1.0)  # passive worked
+    await sup.check(400.0)  # later silence is a normal outage
+    assert plan.fallbacks == []
+    assert state(sup) is ScanState.RECOVERING

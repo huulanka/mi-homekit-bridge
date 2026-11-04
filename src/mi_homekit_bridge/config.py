@@ -82,7 +82,8 @@ class BluetoothConfig:
     """BlueZ adapter name, e.g. ``hci0``."""
     scanning_mode: ScanningMode = "active"
     """``passive`` only listens and never sends scan requests. It needs BlueZ
-    advertisement monitor support (BlueZ 5.56+, Linux 5.10+)."""
+    advertisement monitors (``bluetoothd --experimental``); if it does not work,
+    the bridge falls back to ``active``."""
 
 
 @dataclass(frozen=True, slots=True)

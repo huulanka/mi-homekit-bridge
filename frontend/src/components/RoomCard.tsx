@@ -1,9 +1,20 @@
 import type { OverviewSensor, SensorLive } from '../api'
 import { HEATING_LIMIT, freshOutdoorTemperature, humidSeverity, signalBars, targetAdvice } from '../advice'
-import { formatAgo, formatDelta, formatFraction, formatKelvin, formatPercent, formatSteps, formatValue } from '../format'
+import { formatAgo, formatDelta, formatKelvin, formatMarks, formatPercent, formatValue } from '../format'
 import { t } from '../i18n'
 import type { Theme } from '../theme'
-import { BatteryIcon, CloudIcon, DropIcon, HomeIcon, SignalIcon, WarningIcon } from './Icons'
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  BatteryIcon,
+  CheckIcon,
+  CloudIcon,
+  DropIcon,
+  HomeIcon,
+  SignalIcon,
+  TargetIcon,
+  WarningIcon,
+} from './Icons'
 import { severityFill } from '../severity'
 import { SeverityIcon } from './Severity'
 import { Sparkline } from './Sparkline'
@@ -23,35 +34,41 @@ const STALE_SECONDS = { ble: 20 * 60, weather: 75 * 60 }
 function TargetBlock({ sensor, outdoor, now }: { sensor: OverviewSensor; outdoor: OverviewSensor | undefined; now: number }) {
   const advice = targetAdvice(sensor, outdoor, now)
   if (!advice) return null
-  const target = formatValue(advice.target, 'temperature')
-  const basis = advice.average ?? advice.now
-  const verdict =
-    advice.status === 'ok'
-      ? t('onTarget')
-      : advice.status === 'unknown' || basis === null
-        ? null
-        : t(advice.status === 'warm' ? 'tooWarm' : 'tooCold', { value: formatKelvin(basis) })
-  const outside = freshOutdoorTemperature(outdoor, now)
-  const heatingOff = advice.status === 'warm' && advice.steps === null && outside !== null && outside >= HEATING_LIMIT
+  const target = t('target', { value: formatValue(advice.target, 'temperature') })
+  const deviation =
+    advice.deviation === null || advice.status === 'ok' || advice.status === 'unknown'
+      ? null
+      : t(advice.status === 'warm' ? 'tooWarm' : 'tooCold', { value: formatKelvin(advice.deviation) })
+
+  let icon = <TargetIcon className="size-4" />
+  let headline = target
+  let detail: string | null = null
+  if (advice.status === 'ok') {
+    icon = <CheckIcon className="size-4 text-good" />
+    headline = t('onTarget')
+    detail = target
+  } else if (advice.marks !== null) {
+    icon = advice.marks < 0 ? <ArrowDownIcon className="size-4" /> : <ArrowUpIcon className="size-4" />
+    headline = t(advice.marks < 0 ? 'turnDown' : 'turnUp', { marks: formatMarks(Math.abs(advice.marks)) })
+    detail = `${deviation} (${t('recent3h')}) · ${target}`
+  } else if (deviation) {
+    headline = `${deviation} (${t('recent3h')})`
+    detail = target
+  }
 
   return (
-    <div className="grid gap-0.5 border-t border-border pt-3 text-xs text-ink-2">
-      <p className="flex flex-wrap items-baseline gap-x-2">
-        <span className="font-medium text-ink">{t('target', { value: target })}</span>
-        {verdict && <span>{advice.average !== null ? t('avg24h', { value: verdict }) : verdict}</span>}
-      </p>
-      {advice.steps !== null && (
-        <p className="text-ink">
-          {t(advice.steps < 0 ? 'turnDown' : 'turnUp', { steps: formatSteps(advice.steps) })}
-        </p>
-      )}
-      {heatingOff ? (
-        <p className="text-muted">{t('heatingOff', { limit: formatValue(HEATING_LIMIT, 'temperature') })}</p>
-      ) : (
-        advice.status !== 'ok' && (
-          <p className="text-muted">{t('dialHint', { target, dial: formatFraction(advice.dial) })}</p>
-        )
-      )}
+    <div className="flex items-start gap-3 border-t border-border pt-3 text-xs text-ink-2">
+      <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-wash text-ink" aria-hidden>
+        {icon}
+      </span>
+      <div className="grid gap-0.5">
+        <p className="text-[13px] font-medium text-ink">{headline}</p>
+        {detail && <p>{detail}</p>}
+        {advice.marks !== null && <p className="text-muted">{t('waitHint')}</p>}
+        {advice.heatingOff && (
+          <p className="text-muted">{t('heatingOff', { limit: formatValue(HEATING_LIMIT, 'temperature') })}</p>
+        )}
+      </div>
     </div>
   )
 }

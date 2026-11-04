@@ -12,11 +12,12 @@ from mi_homekit_bridge.app import (
     BridgeApp,
     EventLog,
     Recorder,
+    ScannerFactory,
     _fetch_weather,
     sensor_infos,
 )
 from mi_homekit_bridge.bluetooth import ScanState, ScanSupervisor
-from mi_homekit_bridge.config import BridgeConfig, SensorConfig, WeatherConfig
+from mi_homekit_bridge.config import BluetoothConfig, BridgeConfig, SensorConfig, WeatherConfig
 from mi_homekit_bridge.history import HistoryStore, Sample, SensorInfo
 from mi_homekit_bridge.homekit import aid_for_mac, create_driver, load_or_create_setup
 from mi_homekit_bridge.weather import Observation, WeatherError
@@ -255,7 +256,7 @@ async def test_status(driver: AccessoryDriver) -> None:
     info = service_info(encrypted_mibeacon(temperature_object(21.0)), rssi=-71)
     app.handle_advertisement(info, now=90.0)
 
-    status = app.status(supervisor, started=0.0, now=100.0, wall=10_000.0)
+    status = app.status(supervisor, scanning_mode="active", started=0.0, now=100.0, wall=10_000.0)
     assert status.started_at == 9900
     assert (status.bluetooth_state, status.bluetooth_since) == ("running", 9910)
     assert status.last_advertisement == 9995
@@ -271,7 +272,7 @@ async def test_status(driver: AccessoryDriver) -> None:
     assert (bedroom.reporting, bedroom.problem) == (False, False)
     assert status.problems == ["homekit"]
 
-    later = app.status(supervisor, started=0.0, now=700.0, wall=10_600.0)
+    later = app.status(supervisor, scanning_mode="active", started=0.0, now=700.0, wall=10_600.0)
     assert "sensor:" + OTHER_MAC in later.problems
     assert app.status_line(supervisor) == "Bluetooth running, 1/2 sensors reporting"
 
@@ -289,3 +290,23 @@ async def test_recorder_waits_for_clock_sync(driver: AccessoryDriver, store: His
     latest = store.latest(TEST_MAC)
     assert latest is not None
     assert latest.ts == 600
+
+
+def test_scanner_factory_falls_back_from_passive_once(store: HistoryStore) -> None:
+    factory = ScannerFactory(
+        lambda _info: None, BluetoothConfig(scanning_mode="passive"), EventLog(store)
+    )
+    assert factory.fall_back("nothing was received since the start")
+    assert factory.mode == "active"
+    assert not factory.fall_back("again")
+    (event,) = store.events()
+    assert (event.kind, dict(event.data)) == (
+        "passive_unavailable",
+        {"reason": "nothing was received since the start"},
+    )
+
+
+def test_scanner_factory_never_falls_back_from_active(store: HistoryStore) -> None:
+    factory = ScannerFactory(lambda _info: None, BluetoothConfig(), EventLog(store))
+    assert not factory.fall_back("whatever")
+    assert store.events() == []
