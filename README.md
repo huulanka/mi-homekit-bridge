@@ -345,7 +345,7 @@ Disable it with `air_quality = false` in `[bridge]`.
 | Command | Purpose |
 |---|---|
 | `mi-homekit-bridge run` | run the bridge (used by the systemd unit) |
-| `mi-homekit-bridge scan [-t SECONDS]` | list nearby supported sensors with signal strength |
+| `mi-homekit-bridge scan [-t SECONDS]` | list nearby supported sensors with signal strength (while the service runs, only those matching the [address filter](#bluetooth-recovery)) |
 | `mi-homekit-bridge fetch-keys [--env-file PATH] [--server REGION]` | fetch bindkeys from the Xiaomi cloud |
 | `mi-homekit-bridge set-key MAC [--env-file PATH]` | store a bindkey you got elsewhere (hidden prompt) |
 | `mi-homekit-bridge demo [--port 8080] [--days 400]` | serve the dashboard with generated sample data |
@@ -384,6 +384,16 @@ everywhere: on a Raspberry Pi 3 with BlueZ 5.82 it starts but delivers no data a
 all. If passive scanning fails or nothing arrives within two minutes of the start,
 the bridge switches to active scanning on its own and records a
 `passive_unavailable` event; it never resets the controller because of it.
+
+**Address filter**: in active mode the bridge asks BlueZ to report only devices whose
+address starts with the prefix all configured sensors share (`A4:C1:38:` for
+LYWSD03MMC). Otherwise BlueZ sends a D-Bus signal for every signal strength change of
+every Bluetooth device nearby: on a Raspberry Pi 3 in a block of flats about 100 per
+second, which cost a third of a CPU core across dbus-daemon, bluetoothd,
+NetworkManager and the bridge. The controller scans exactly as before. BlueZ applies
+the filter to every program scanning at the same time, so stop the service
+(`sudo systemctl stop mi-homekit-bridge`) before looking for a sensor with a
+different address prefix using `scan`.
 
 ## Troubleshooting
 

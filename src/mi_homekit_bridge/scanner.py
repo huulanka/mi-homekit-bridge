@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from bleak import BleakScanner
 from bleak.args.bluez import BlueZScannerArgs, OrPattern
@@ -52,13 +52,32 @@ def service_info_from_bleak(
     )
 
 
+def common_address_prefix(addresses: Iterable[str]) -> str | None:
+    """The longest prefix all ``addresses`` share (e.g. ``A4:C1:38:``), or ``None``."""
+    prefix: list[str] = []
+    for chars in zip(*(address.upper() for address in addresses), strict=False):
+        if len(set(chars)) > 1:
+            break
+        prefix.append(chars[0])
+    return "".join(prefix) or None
+
+
 def create_scanner(
     callback: ServiceInfoCallback,
     *,
     adapter: str = DEFAULT_ADAPTER,
     scanning_mode: ScanningMode = "active",
+    address_prefix: str | None = None,
 ) -> BleakScanner:
-    """A scanner that forwards every advertisement to ``callback``."""
+    """A scanner that forwards every advertisement to ``callback``.
+
+    With ``address_prefix``, an active scan only reports devices whose address
+    starts with it. Otherwise BlueZ sends a D-Bus signal for every signal strength
+    change of every device nearby (around 100 per second in a block of flats), which
+    keeps dbus-daemon, bluetoothd, NetworkManager and this process busy. BlueZ
+    filters this itself; the controller scans exactly as before. The filter applies
+    to every program scanning on the adapter at the same time.
+    """
     loop = asyncio.get_running_loop()
 
     def on_detection(device: BLEDevice, advertisement: AdvertisementData) -> None:
@@ -67,6 +86,8 @@ def create_scanner(
     bluez: BlueZScannerArgs = {"adapter": adapter}
     if scanning_mode == "passive":
         bluez["or_patterns"] = list(PASSIVE_PATTERNS)
+    elif address_prefix:
+        bluez["filters"] = {"Pattern": address_prefix}
     return BleakScanner(detection_callback=on_detection, scanning_mode=scanning_mode, bluez=bluez)
 
 
