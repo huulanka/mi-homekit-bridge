@@ -92,3 +92,24 @@ export function SignalIcon({ bars, className }: IconProps & { bars: number }) {
     </svg>
   )
 }
+
+export const ArrowUpIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...common}>
+    <path d="M12 19V5.5M6.5 11 12 5.5 17.5 11" />
+  </svg>
+)
+
+export const ArrowDownIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...common}>
+    <path d="M12 5v13.5M6.5 13 12 18.5 17.5 13" />
+  </svg>
+)
+
+/** A target: the room's desired temperature. */
+export const TargetIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...common}>
+    <circle cx="12" cy="12" r="8.5" />
+    <circle cx="12" cy="12" r="4.5" />
+    <circle cx="12" cy="12" r="0.6" fill="currentColor" />
+  </svg>
+)

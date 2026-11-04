@@ -30,19 +30,9 @@ export function formatKelvin(value: number): string {
 const percent = new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 0 })
 export const formatPercent = (share: number) => percent.format(share)
 
-const FRACTIONS: Record<number, string> = { 0: '', 0.25: '¼', 0.5: '½', 0.75: '¾' }
-
-/** Quarter steps as text: 0.75 -> "¾", 2.5 -> "2½". */
-export function formatFraction(value: number): string {
-  const whole = Math.floor(value)
-  const fraction = FRACTIONS[Math.round((value - whole) * 4) / 4] ?? ''
-  return whole === 0 && fraction ? fraction : `${whole}${fraction}`
-}
-
-/** A number of dial steps, e.g. "½ Stufe", "1¼ Stufen". */
-export function formatSteps(steps: number): string {
-  const amount = Math.abs(steps)
-  return `${formatFraction(amount)} ${amount > 1 ? t('stepMany') : t('stepOne')}`
+/** Marks on a thermostat dial, e.g. "1 Strich", "2 Striche". */
+export function formatMarks(count: number): string {
+  return count === 1 ? t('markOne') : t('markMany', { n: count })
 }
 
 const timeFormat = new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit' })

@@ -104,6 +104,7 @@ export type EventKind =
   | 'scan_recovered'
   | 'bluetooth_reset'
   | 'bluetooth_failed'
+  | 'passive_unavailable'
 
 export interface BridgeEvent {
   ts: number

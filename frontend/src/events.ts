@@ -7,6 +7,7 @@ const SEVERITY: Record<string, Severity | undefined> = {
   sensor_lost: 'warning',
   scan_silent: 'warning',
   scan_failed: 'warning',
+  passive_unavailable: 'warning',
   bluetooth_reset: 'critical',
   bluetooth_failed: 'critical',
   sensor_back: 'good',
@@ -23,6 +24,7 @@ const KNOWN = new Set([
   'scan_recovered',
   'bluetooth_reset',
   'bluetooth_failed',
+  'passive_unavailable',
 ])
 
 export function describeEvent(event: BridgeEvent, names: Record<string, string>): string {

@@ -135,9 +135,11 @@ An optional, read-only web dashboard built into the bridge (no extra service):
 - **Overview**: one card per room with temperature, humidity, dew point, battery,
   signal strength, today's range, the difference to outdoor and the last 24 hours.
 - **Target temperature** (optional, per room): whether the room is too warm or too
-  cold on average over the last 24 hours, and how far to turn a radiator thermostat
-  dial (rule of thumb: dial 1 is about 12 °C, each number adds about 4 °C). No advice
-  outside the heating season (above 15 °C outdoors).
+  cold (median of the last 3 hours, so airing does not count and a turned thermostat
+  shows within hours) and which way to turn the radiator thermostat, in marks on the
+  dial (one mark is roughly 1 °C). Deliberately relative: what a dial position means
+  differs a lot between rooms and flats. No advice to turn down when it is above
+  15 °C outdoors.
 - **Humidity check**: how much of the last 7 days the humidity was above 60 %. Rarely
   is fine; more than half of the time means the room stays damp (mould risk).
 - **Live status**: a banner when Bluetooth fails, the bridge is not paired with Apple
@@ -236,7 +238,7 @@ target_temperature = 21.0    # optional, °C, shown in the dashboard
 
 [bluetooth]                  # optional
 adapter = "hci0"
-scanning_mode = "active"     # or "passive": only listen (BlueZ 5.56+)
+scanning_mode = "active"     # or "passive": only listen (see Bluetooth recovery)
 
 [history]                    # optional, enabled by default
 enabled = true
@@ -313,14 +315,21 @@ Everything shows up in the dashboard's event list and in
 `journalctl -u mi-homekit-bridge`. `systemctl status mi-homekit-bridge` shows a
 one-line summary such as `Bluetooth running, 2/2 sensors reporting`.
 
-On a Raspberry Pi 3, these make the controller more reliable:
+On a Raspberry Pi 3, these help the controller:
 
-- `scanning_mode = "passive"` in `[bluetooth]`: less traffic between the Pi and the
-  Bluetooth chip.
+- A proper power supply (5.1 V, 2.5 A). `vcgencmd get_throttled` other than
+  `throttled=0x0` means under-voltage (or throttling) has occurred since boot.
 - If the Pi is connected by cable, switch off the Wi-Fi part of the shared
   Wi-Fi/Bluetooth chip: `dtoverlay=disable-wifi` in `/boot/firmware/config.txt`.
-- A proper power supply (5.1 V, 2.5 A). `vcgencmd get_throttled` other than
-  `throttled=0x0` means under-voltage has occurred since boot.
+
+**Passive scanning** (`scanning_mode = "passive"`) only listens and causes less
+radio traffic. It uses BlueZ advertisement monitors, which need `bluetoothd
+--experimental` (`sudo systemctl edit bluetooth`, then `ExecStart=` and
+`ExecStart=/usr/libexec/bluetooth/bluetoothd --experimental`). It does not work
+everywhere: on a Raspberry Pi 3 with BlueZ 5.82 it starts but delivers no data at
+all. If passive scanning fails or nothing arrives within two minutes of the start,
+the bridge switches to active scanning on its own and records a
+`passive_unavailable` event; it never resets the controller because of it.
 
 ## Troubleshooting
 

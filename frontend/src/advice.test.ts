@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { OverviewSensor, Status } from './api'
-import { banners, dialFor, humidSeverity, signalBars, targetAdvice } from './advice'
+import { banners, humidSeverity, median, recentTemperature, signalBars, targetAdvice } from './advice'
 
 const NOW = 1_800_000_000
 
@@ -23,13 +23,16 @@ function outdoor(temperature: number, age = 600): OverviewSensor {
 
 const day = (t: number) => Array<number>(48).fill(t)
 
-describe('dialFor', () => {
-  it('follows the rule of thumb in half steps', () => {
-    expect(dialFor(20)).toBe(3)
-    expect(dialFor(18)).toBe(2.5)
-    expect(dialFor(12)).toBe(1)
-    expect(dialFor(5)).toBe(1)
-    expect(dialFor(30)).toBe(5)
+describe('recentTemperature', () => {
+  it('takes the median of the last 3 hours', () => {
+    const spark = [20, 20, 20, 24, 24, 24, 23, 24, 15, 24].map((t, i) => [i, t, null] as [number, number, null])
+    expect(recentTemperature(spark)).toBe(24) // the 15 (airing) does not count
+  })
+  it('needs at least 2 hours of data', () => {
+    expect(recentTemperature([[0, 20, null], [1, null, null], [2, 21, null]])).toBeNull()
+  })
+  it('handles even counts', () => {
+    expect(median([1, 2, 3, 4])).toBe(2.5)
   })
 })
 
@@ -37,37 +40,47 @@ describe('targetAdvice', () => {
   it('is on target within half a kelvin', () => {
     const advice = targetAdvice(room(day(18.4), 18.2), outdoor(5), NOW)!
     expect(advice.status).toBe('ok')
-    expect(advice.steps).toBeNull()
+    expect(advice.marks).toBeNull()
   })
 
-  it('advises turning down by the 24-hour average, not the current value', () => {
-    // Airing just now (16 °C), but on average 3 K too warm.
-    const advice = targetAdvice(room(day(21), 16), outdoor(5), NOW)!
+  it('advises turning down in marks: the living room at dial 3 with 24 °C', () => {
+    const advice = targetAdvice(room(day(24), 24, 21), outdoor(5), NOW)!
     expect(advice.status).toBe('warm')
-    expect(advice.now).toBe(-2)
-    expect(advice.average).toBe(3)
-    expect(advice.steps).toBe(-0.75)
-    expect(advice.dial).toBe(2.5)
+    expect(advice.deviation).toBe(3)
+    expect(advice.marks).toBe(-3)
   })
 
-  it('advises at least a quarter step', () => {
-    expect(targetAdvice(room(day(17.3), 17.3), undefined, NOW)!.steps).toBe(0.25)
+  it('follows a turned thermostat within hours, not a day', () => {
+    // 24 °C all day, but the last 3 hours (after turning down) at 21.2 °C.
+    const advice = targetAdvice(room([...Array<number>(42).fill(24), ...Array<number>(6).fill(21.2)], 21.2, 21), outdoor(5), NOW)!
+    expect(advice.status).toBe('ok')
   })
 
-  it('gives no dial advice outside the heating season', () => {
+  it('ignores a short airing dip', () => {
+    const advice = targetAdvice(room([...day(19), 16], 16), outdoor(5), NOW)!
+    expect(advice.status).toBe('warm')
+    expect(advice.marks).toBe(-1)
+  })
+
+  it('advises at least one mark', () => {
+    expect(targetAdvice(room(day(17.3), 17.3), undefined, NOW)!.marks).toBe(1)
+  })
+
+  it('gives no advice to turn down when it is warm outside', () => {
     const advice = targetAdvice(room(day(24), 24), outdoor(22), NOW)!
     expect(advice.status).toBe('warm')
-    expect(advice.steps).toBeNull()
+    expect(advice.heatingOff).toBe(true)
+    expect(advice.marks).toBeNull()
   })
 
   it('ignores a stale outdoor value', () => {
-    expect(targetAdvice(room(day(24), 24), outdoor(22, 3 * 3600), NOW)!.steps).toBe(-1.5)
+    expect(targetAdvice(room(day(24), 24), outdoor(22, 3 * 3600), NOW)!.marks).toBe(-6)
   })
 
   it('needs a few hours of data for advice', () => {
     const advice = targetAdvice(room([20, 20], 20), undefined, NOW)!
     expect(advice.status).toBe('warm')
-    expect(advice.steps).toBeNull()
+    expect(advice.marks).toBeNull()
   })
 
   it('is absent without a target', () => {

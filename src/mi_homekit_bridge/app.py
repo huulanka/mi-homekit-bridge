@@ -13,16 +13,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiohttp
+from bleak import BleakScanner
 from habluetooth import BluetoothServiceInfoBleak
 from pyhap.accessory_driver import AccessoryDriver
 
 from . import __version__
 from .bluetooth import ScanSupervisor
-from .config import BridgeConfig, SensorConfig
+from .config import BluetoothConfig, BridgeConfig, ScanningMode, SensorConfig
 from .decoder import Reading, SensorDecoder
 from .history import Event, HistoryStore, Sample, SensorInfo
 from .homekit import ThermometerAccessory, create_bridge, create_driver
-from .scanner import create_scanner
+from .scanner import ServiceInfoCallback, create_scanner
 from .status import BridgeStatus, SensorStatus
 from .systemd import clock_synchronized, notify, watchdog_interval
 from .weather import WeatherError, WeatherProvider, create_provider
@@ -52,6 +53,35 @@ class EventLog:
             self._store.add_event(Event(int(self._clock()), kind, sensor_id, data))
         except sqlite3.Error:
             _LOGGER.exception("Could not record event %s", kind)
+
+
+class ScannerFactory:
+    """Creates scanners as configured; falls back from passive to active once if
+    passive scanning does not work on this system."""
+
+    def __init__(
+        self, callback: ServiceInfoCallback, bluetooth: BluetoothConfig, events: EventLog
+    ) -> None:
+        self._callback = callback
+        self._adapter = bluetooth.adapter
+        self._events = events
+        self.mode: ScanningMode = bluetooth.scanning_mode
+
+    def __call__(self) -> BleakScanner:
+        return create_scanner(self._callback, adapter=self._adapter, scanning_mode=self.mode)
+
+    def fall_back(self, reason: str) -> bool:
+        if self.mode != "passive":
+            return False
+        self.mode = "active"
+        _LOGGER.warning(
+            "Passive scanning does not work on this system (%s), using active scanning. "
+            "It needs bluetoothd --experimental and kernel support; set "
+            'scanning_mode = "active" in [bluetooth] to silence this warning.',
+            reason,
+        )
+        self._events("passive_unavailable", reason=reason)
+        return True
 
 
 @dataclass(slots=True)
@@ -194,7 +224,13 @@ class BridgeApp:
     # -- status ----------------------------------------------------------------
 
     def status(
-        self, supervisor: ScanSupervisor, *, started: float, now: float, wall: float
+        self,
+        supervisor: ScanSupervisor,
+        *,
+        scanning_mode: ScanningMode,
+        started: float,
+        now: float,
+        wall: float,
     ) -> BridgeStatus:
         """Live status. ``started`` and ``now`` are monotonic, ``wall`` is ``time.time()``."""
 
@@ -209,7 +245,7 @@ class BridgeApp:
             bluetooth_state=supervisor.state.value,
             bluetooth_since=round(wall - (now - supervisor.since)),
             bluetooth_error=supervisor.last_error,
-            scanning_mode=self._config.bluetooth.scanning_mode,
+            scanning_mode=scanning_mode,
             last_advertisement=to_wall(supervisor.last_advertisement),
             homekit_paired=bool(state.paired),
             homekit_controllers=len(state.paired_clients),
@@ -333,18 +369,22 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
             supervisor.advertisement_seen(now)
             app.handle_advertisement(info, now)
 
+        factory = ScannerFactory(on_advertisement, config.bluetooth, events)
         supervisor = ScanSupervisor(
-            lambda: create_scanner(
-                on_advertisement,
-                adapter=config.bluetooth.adapter,
-                scanning_mode=config.bluetooth.scanning_mode,
-            ),
+            factory,
             state_dir=state_dir,
             listener=lambda kind, data: events(kind, **data),
+            fallback=factory.fall_back,
         )
 
         def status() -> BridgeStatus:
-            return app.status(supervisor, started=started, now=loop.time(), wall=time.time())
+            return app.status(
+                supervisor,
+                scanning_mode=factory.mode,
+                started=started,
+                now=loop.time(),
+                wall=time.time(),
+            )
 
         if store is not None:
             _LOGGER.info(
