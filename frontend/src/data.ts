@@ -7,6 +7,18 @@ export function stepMs(bucket: number | 'day'): number {
   return (bucket === 'day' ? 86400 : bucket) * 1000
 }
 
+/** Where a line should break: the bucket size, or the usual spacing of the sensor's
+ * samples if it is sampled less often (outdoor values come every 15 minutes, the
+ * 24-hour view has 5-minute buckets). Timestamps and step in the same unit. */
+export function lineStep(timestamps: number[], step: number): number {
+  if (timestamps.length < 3) return step
+  const diffs = timestamps
+    .slice(1)
+    .map((ts, i) => ts - timestamps[i]!)
+    .sort((x, y) => x - y)
+  return Math.max(step, diffs[Math.floor(diffs.length / 2)]!)
+}
+
 /** Insert null points where data is missing, so lines break instead of bridging gaps. */
 export function withGaps(points: [number, number | null][], step: number): [number, number | null][] {
   const result: [number, number | null][] = []

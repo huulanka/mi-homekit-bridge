@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Point, Series } from './api'
-import { computeDeltas, heatmapCells, profileValues, withGaps } from './data'
+import { computeDeltas, heatmapCells, lineStep, profileValues, withGaps } from './data'
 
 const point = (ts: number, temperature: number | null, humidity: number | null = null, absolute: number | null = null): Point => [
   ts,
@@ -21,6 +21,14 @@ describe('withGaps', () => {
   })
   it('keeps continuous data untouched', () => {
     expect(withGaps([[0, 1], [300, 2]], 300)).toEqual([[0, 1], [300, 2]])
+  })
+})
+
+describe('lineStep', () => {
+  it('uses the spacing of sensors sampled less often than the buckets', () => {
+    expect(lineStep([0, 900, 1800, 2700, 4500], 300)).toBe(900) // outdoor every 15 min in the 5-min view
+    expect(lineStep([0, 300, 600, 900], 300)).toBe(300)
+    expect(lineStep([0, 900], 300)).toBe(300)
   })
 })
 

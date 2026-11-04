@@ -3,7 +3,7 @@ import { pick, type Metric, type Series } from '../api'
 import { formatDate, formatDateTime, formatKelvin, formatMinutes } from '../format'
 import { t } from '../i18n'
 import type { Theme } from '../theme'
-import { stepMs, withGaps } from '../data'
+import { lineStep, stepMs, withGaps } from '../data'
 import { baseOption, fineScreen, formatValue, timeAxis, tooltipRow, tooltipTitle, valueAxis } from './common'
 import { EChart } from './EChart'
 import type { ChartOption } from './setup'
@@ -54,12 +54,13 @@ function buildHistoryOption(data: Series, metric: Metric, theme: Theme, colors: 
       .map((a) => nearest(averages, a.lowest * 1000))
       .filter((m): m is [number, number] => m !== null)
     const target = metric === 'temperature' ? sensor.target_temperature : null
+    const sensorStep = lineStep(values.map(([ts]) => ts), step)
     series.push({
       id: `avg:${sensor.id}`,
       name: sensor.name,
       type: 'line',
       color,
-      data: withGaps(values.map(([ts, , avg]) => [ts, avg]), step),
+      data: withGaps(values.map(([ts, , avg]) => [ts, avg]), sensorStep),
       showSymbol: false,
       symbolSize: 8,
       lineStyle: { width: 2, cap: 'round', join: 'round' },
@@ -107,7 +108,7 @@ function buildHistoryOption(data: Series, metric: Metric, theme: Theme, colors: 
           type: 'line',
           color,
           stack: band,
-          data: withGaps(values.map(([ts, min]) => [ts, min]), step),
+          data: withGaps(values.map(([ts, min]) => [ts, min]), sensorStep),
           showSymbol: false,
           lineStyle: { opacity: 0 },
           tooltip: { show: false },
@@ -122,7 +123,7 @@ function buildHistoryOption(data: Series, metric: Metric, theme: Theme, colors: 
           stack: band,
           data: withGaps(
             values.map(([ts, min, , max]) => [ts, min !== null && max !== null ? max - min : null]),
-            step,
+            sensorStep,
           ),
           showSymbol: false,
           lineStyle: { opacity: 0 },
