@@ -24,12 +24,14 @@ from aiohttp import web
 
 from . import __version__
 from .history import DAY, Bucket, HistoryStore, SensorInfo
+from .status import BridgeStatus
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_STATIC_DIR = Path(str(files("mi_homekit_bridge") / "static"))
 
 Clock = Callable[[], float]
+StatusProvider = Callable[[], BridgeStatus]
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,10 +52,15 @@ PROFILE_DAYS = (7, 30, 90, 365)
 HEATMAP_DAYS = (14, 30, 90)
 SPARK_SECONDS = 24 * 3600
 SPARK_BUCKET = 1800
+HUMID_THRESHOLD = 60.0
+"""Relative humidity above which mould becomes likely if it persists (%)."""
+HUMID_SECONDS = 7 * 86400
+EVENTS_LIMIT = 50
 
 _STORE: web.AppKey[HistoryStore] = web.AppKey("store")
 _CLOCK: web.AppKey[Clock] = web.AppKey("clock")
 _STATIC: web.AppKey[Path] = web.AppKey("static_dir")
+_STATUS: web.AppKey[StatusProvider | None] = web.AppKey("status")
 
 
 def dew_point(temperature: float | None, humidity: float | None) -> float | None:
@@ -82,7 +89,12 @@ def _bucket_row(b: Bucket) -> list[float | int | None]:
 
 
 def _sensor_json(sensor: SensorInfo) -> dict[str, Any]:
-    return {"id": sensor.id, "name": sensor.name, "kind": sensor.kind}
+    return {
+        "id": sensor.id,
+        "name": sensor.name,
+        "kind": sensor.kind,
+        "target_temperature": sensor.target_temperature,
+    }
 
 
 def _int_choice(request: web.Request, name: str, choices: tuple[int, ...], default: int) -> int:
@@ -110,6 +122,17 @@ async def overview(request: web.Request) -> web.Response:
         latest = await _run(store.latest, sensor.id)
         today = await _run(store.series, sensor.id, midnight, now + 1, DAY)
         spark = await _run(store.series, sensor.id, now - SPARK_SECONDS, now + 1, SPARK_BUCKET)
+        humid = None
+        if sensor.kind == "ble":
+            share = await _run(
+                store.humidity_share, sensor.id, now - HUMID_SECONDS, now + 1, HUMID_THRESHOLD
+            )
+            if share.share is not None:
+                humid = {
+                    "threshold": HUMID_THRESHOLD,
+                    "share": _round(share.share, 3),
+                    "hours": share.hours,
+                }
         result.append(
             _sensor_json(sensor)
             | {
@@ -124,6 +147,7 @@ async def overview(request: web.Request) -> web.Response:
                 },
                 "today": _bucket_row(today[-1])[1:] if today else None,
                 "spark": [[b.ts, _round(b.temperature_avg), _round(b.humidity_avg)] for b in spark],
+                "humid": humid,
             }
         )
     return web.json_response(
@@ -219,8 +243,36 @@ async def export_csv(request: web.Request) -> web.Response:
     )
 
 
-async def health(_request: web.Request) -> web.Response:
-    return web.json_response({"status": "ok", "version": __version__})
+async def event_list(request: web.Request) -> web.Response:
+    store = request.app[_STORE]
+    items = await _run(store.events, EVENTS_LIMIT)
+    return web.json_response(
+        {
+            "events": [
+                {"ts": e.ts, "kind": e.kind, "sensor_id": e.sensor_id, "data": dict(e.data)}
+                for e in items
+            ]
+        }
+    )
+
+
+async def live_status(request: web.Request) -> web.Response:
+    provider = request.app[_STATUS]
+    if provider is None:
+        raise web.HTTPNotFound(
+            text='{"error": "no live status in this mode"}', content_type="application/json"
+        )
+    return web.json_response(provider().to_json())
+
+
+async def health(request: web.Request) -> web.Response:
+    """``200`` if everything works, ``503`` with the list of problems otherwise."""
+    provider = request.app[_STATUS]
+    problems = provider().problems if provider is not None else []
+    return web.json_response(
+        {"status": "degraded" if problems else "ok", "version": __version__, "problems": problems},
+        status=503 if problems else 200,
+    )
 
 
 # -- frontend -----------------------------------------------------------------
@@ -271,17 +323,25 @@ async def headers_middleware(request: web.Request, handler: Handler) -> web.Stre
 
 
 def create_app(
-    store: HistoryStore, *, static_dir: Path = DEFAULT_STATIC_DIR, clock: Clock = time.time
+    store: HistoryStore,
+    *,
+    status: StatusProvider | None = None,
+    static_dir: Path = DEFAULT_STATIC_DIR,
+    clock: Clock = time.time,
 ) -> web.Application:
+    """The dashboard app. Without ``status`` (demo mode) there is no live status."""
     app = web.Application(middlewares=[headers_middleware])
     app[_STORE] = store
     app[_CLOCK] = clock
     app[_STATIC] = static_dir
+    app[_STATUS] = status
     app.router.add_get("/api/overview", overview)
     app.router.add_get("/api/series", series)
     app.router.add_get("/api/profile", profile)
     app.router.add_get("/api/heatmap", heatmap)
     app.router.add_get("/api/export.csv", export_csv)
+    app.router.add_get("/api/events", event_list)
+    app.router.add_get("/api/status", live_status)
     app.router.add_get("/api/health", health)
     app.router.add_get("/", index)
     if (static_dir / "assets").is_dir():

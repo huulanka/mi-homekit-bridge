@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from mi_homekit_bridge.history import DAY, HistoryStore, Sample, SensorInfo
+from mi_homekit_bridge.history import DAY, Event, HistoryStore, Sample, SensorInfo
 
 BERLIN = ZoneInfo("Europe/Berlin")
 
@@ -142,3 +142,51 @@ def test_export_rows_and_first_timestamp(store: HistoryStore) -> None:
         ("Living Room", 100, 21.0, 50.0, 90),
         ("Outdoor", 200, 5.0, 80.0, None),
     ]
+
+
+def test_version_1_database_is_migrated(tmp_path: Path) -> None:
+    path = tmp_path / "v1.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE sensors (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('ble', 'weather'))) STRICT;
+            CREATE TABLE readings (sensor_id TEXT NOT NULL REFERENCES sensors (id),
+                ts INTEGER NOT NULL, temperature REAL, humidity REAL, battery INTEGER,
+                PRIMARY KEY (sensor_id, ts)) STRICT, WITHOUT ROWID;
+            INSERT INTO sensors VALUES ('A', 'Living Room', 'ble');
+            INSERT INTO readings VALUES ('A', 100, 21.0, 50.0, NULL);
+            PRAGMA user_version = 1;
+            """
+        )
+    store = HistoryStore(path)
+    assert store.sensors() == [SensorInfo("A", "Living Room", "ble", None)]
+    assert store.latest("A") == Sample("A", 100, 21.0, 50.0, None)
+    store.upsert_sensors([SensorInfo("A", "Living Room", "ble", 20.5)])
+    assert store.sensors()[0].target_temperature == 20.5
+    store.add_event(Event(200, "started", data={"version": "x"}))
+    assert store.events() == [Event(200, "started", None, {"version": "x"})]
+    store.close()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+
+
+def test_events_newest_first_and_pruned(store: HistoryStore) -> None:
+    year = 365 * 86400
+    store.add_event(Event(1000, "sensor_lost", "A", {"minutes": 60}))
+    store.add_event(Event(2000, "sensor_back", "A", {"minutes": 70}))
+    assert [e.kind for e in store.events()] == ["sensor_back", "sensor_lost"]
+    assert [e.kind for e in store.events(limit=1)] == ["sensor_back"]
+    store.add_event(Event(1000 + 2 * year + 1, "started"))  # the first one expires
+    assert [e.kind for e in store.events()] == ["started", "sensor_back"]
+
+
+def test_humidity_share(store: HistoryStore) -> None:
+    store.add_samples(
+        [Sample("A", i * 300, 21.0, 65.0 if i < 3 else 55.0) for i in range(12)]
+        + [Sample("A", 7200, 21.0, None)]
+    )
+    share = store.humidity_share("A", 0, 7201, threshold=60.0)
+    assert share.share == pytest.approx(0.25)
+    assert share.hours == 1  # samples without humidity do not count
+    assert store.humidity_share("W", 0, 7201, 60.0).share is None

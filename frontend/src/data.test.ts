@@ -28,8 +28,8 @@ describe('computeDeltas', () => {
     start: 0,
     end: 3600,
     sensors: [
-      { id: 'a', name: 'Living', kind: 'ble', points: [point(0, 21), point(300, 21.5), point(4000, 22)] },
-      { id: 'w', name: 'Outdoor', kind: 'weather', points: [point(0, 5), point(900, 6)] },
+      { id: 'a', name: 'Living', kind: 'ble', target_temperature: null, points: [point(0, 21), point(300, 21.5), point(4000, 22)] },
+      { id: 'w', name: 'Outdoor', kind: 'weather', target_temperature: null, points: [point(0, 5), point(900, 6)] },
     ],
   }
 
@@ -64,6 +64,7 @@ describe('heatmapCells', () => {
         id: 'a',
         name: 'Living',
         kind: 'ble',
+        target_temperature: null,
         cells: [
           ['2026-11-02', 7, 19, 50],
           ['2026-11-01', 7, 18, 52],

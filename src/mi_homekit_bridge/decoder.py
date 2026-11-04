@@ -44,6 +44,7 @@ class SensorDecoder:
         self._xiaomi = XiaomiBluetoothDeviceData(bindkey=bindkey)
         self._bthome = BTHomeBluetoothDeviceData(bindkey=bindkey)
         self._warned_missing_key = False
+        self._warned_plaintext = False
         self._seen: dict[str, SensorValue] = {}
 
     def decode(self, service_info: BluetoothServiceInfoBleak) -> Reading | None:
@@ -52,8 +53,20 @@ class SensorDecoder:
             update = self._xiaomi.update(service_info)
             encrypted = _mibeacon_is_encrypted(service_info.service_data[XIAOMI_SERVICE_UUID])
         elif BTHOME_SERVICE_UUID in service_info.service_data:
-            update = self._bthome.update(service_info)
             encrypted = _bthome_is_encrypted(service_info.service_data[BTHOME_SERVICE_UUID])
+            if self._has_bindkey and not encrypted:
+                # bthome-ble drops plaintext data once a key is known (downgrade
+                # protection) and warns about every single advertisement.
+                if not self._warned_plaintext:
+                    self._warned_plaintext = True
+                    _LOGGER.warning(
+                        "%s sends unencrypted BTHome data but a bindkey is configured, "
+                        "so its data is ignored. After flashing custom firmware without "
+                        "encryption, remove its bindkey from the environment.",
+                        service_info.address,
+                    )
+                return None
+            update = self._bthome.update(service_info)
         else:
             return None
 

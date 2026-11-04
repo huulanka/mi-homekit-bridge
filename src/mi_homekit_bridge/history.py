@@ -14,20 +14,35 @@ All methods are blocking; call them via ``asyncio.to_thread`` from async code.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-_SCHEMA = """
+_EVENTS_SCHEMA = """
+CREATE TABLE events (
+    id        INTEGER PRIMARY KEY,
+    ts        INTEGER NOT NULL,
+    kind      TEXT    NOT NULL,
+    sensor_id TEXT,
+    data      TEXT    NOT NULL DEFAULT '{}'
+) STRICT;
+
+CREATE INDEX events_ts ON events (ts);
+"""
+
+_SCHEMA = (
+    """
 CREATE TABLE sensors (
     id   TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('ble', 'weather'))
+    kind TEXT NOT NULL CHECK (kind IN ('ble', 'weather')),
+    target_temperature REAL
 ) STRICT;
 
 CREATE TABLE readings (
@@ -39,6 +54,11 @@ CREATE TABLE readings (
     PRIMARY KEY (sensor_id, ts)
 ) STRICT, WITHOUT ROWID;
 """
+    + _EVENTS_SCHEMA
+)
+
+# Each entry upgrades the schema from version ``index + 1`` to ``index + 2``.
+_MIGRATIONS = ("ALTER TABLE sensors ADD COLUMN target_temperature REAL;" + _EVENTS_SCHEMA,)
 
 SensorKind = Literal["ble", "weather"]
 
@@ -48,6 +68,7 @@ class SensorInfo:
     id: str
     name: str
     kind: SensorKind
+    target_temperature: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +112,32 @@ class HeatmapCell:
     humidity_avg: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class Event:
+    """Something worth remembering, e.g. a sensor that stopped reporting.
+
+    ``kind`` is a stable identifier (``sensor_lost``, ``bluetooth_reset``, ...) and
+    ``data`` holds its parameters, so the dashboard can phrase it in any language.
+    """
+
+    ts: int
+    kind: str
+    sensor_id: str | None = None
+    data: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class HumidityShare:
+    """How often the humidity was above a threshold."""
+
+    share: float | None
+    """Fraction of samples above the threshold, 0-1; ``None`` without samples."""
+    hours: int
+    """Number of distinct hours with samples."""
+
+
 DAY: Literal["day"] = "day"
+EVENT_RETENTION_SECONDS = 2 * 365 * 86400
 
 
 class HistoryStore:
@@ -123,16 +169,22 @@ class HistoryStore:
                 self._conn.executescript(
                     "BEGIN;" + _SCHEMA + f"PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
                 )
+                return
+            for target, script in enumerate(_MIGRATIONS[version - 1 :], start=version + 1):
+                self._conn.executescript(
+                    "BEGIN;" + script + f"PRAGMA user_version = {target}; COMMIT;"
+                )
 
     # -- writing ---------------------------------------------------------------
 
     def upsert_sensors(self, sensors: Iterable[SensorInfo]) -> None:
-        """Register sensors; names follow the current configuration."""
+        """Register sensors; names and targets follow the current configuration."""
         with self._lock:
             self._conn.executemany(
-                "INSERT INTO sensors (id, name, kind) VALUES (?, ?, ?) "
-                "ON CONFLICT (id) DO UPDATE SET name = excluded.name, kind = excluded.kind",
-                [(s.id, s.name, s.kind) for s in sensors],
+                "INSERT INTO sensors (id, name, kind, target_temperature) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (id) DO UPDATE SET name = excluded.name, kind = excluded.kind, "
+                "target_temperature = excluded.target_temperature",
+                [(s.id, s.name, s.kind, s.target_temperature) for s in sensors],
             )
 
     def add_samples(self, samples: Iterable[Sample]) -> int:
@@ -149,14 +201,48 @@ class HistoryStore:
             self._conn.execute("COMMIT")
             return self._conn.total_changes - before
 
+    def add_event(self, event: Event) -> None:
+        """Store an event and forget events older than two years."""
+        with self._lock:
+            self._conn.execute("BEGIN")
+            self._conn.execute(
+                "INSERT INTO events (ts, kind, sensor_id, data) VALUES (?, ?, ?, ?)",
+                (event.ts, event.kind, event.sensor_id, json.dumps(dict(event.data))),
+            )
+            self._conn.execute(
+                "DELETE FROM events WHERE ts < ?", (event.ts - EVENT_RETENTION_SECONDS,)
+            )
+            self._conn.execute("COMMIT")
+
     # -- reading ---------------------------------------------------------------
+
+    def events(self, limit: int = 50) -> list[Event]:
+        """The most recent events, newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts, kind, sensor_id, data FROM events ORDER BY ts DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [Event(r[0], r[1], r[2], json.loads(r[3])) for r in rows]
+
+    def humidity_share(
+        self, sensor_id: str, start: int, end: int, threshold: float
+    ) -> HumidityShare:
+        """Share of samples in ``[start, end)`` with a humidity above ``threshold``."""
+        with self._lock:
+            share, hours = self._conn.execute(
+                "SELECT avg(humidity > ?), count(DISTINCT ts / 3600) FROM readings "
+                "WHERE sensor_id = ? AND ts >= ? AND ts < ? AND humidity IS NOT NULL",
+                (threshold, sensor_id, start, end),
+            ).fetchone()
+        return HumidityShare(share=share, hours=hours)
 
     def sensors(self) -> list[SensorInfo]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, name, kind FROM sensors ORDER BY kind, name"
+                "SELECT id, name, kind, target_temperature FROM sensors ORDER BY kind, name"
             ).fetchall()
-        return [SensorInfo(id=r[0], name=r[1], kind=r[2]) for r in rows]
+        return [SensorInfo(*row) for row in rows]
 
     def latest(self, sensor_id: str) -> Sample | None:
         """The most recent sample, with the last known battery level filled in."""

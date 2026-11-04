@@ -111,3 +111,47 @@ def test_set_key_rejects_bad_input(
     monkeypatch.setattr("getpass.getpass", lambda _prompt: key)
     assert cli.main(["set-key", mac, "--env-file", str(env_file)]) == 2
     assert not env_file.exists()
+
+
+def test_run_exits_75_when_the_controller_needs_a_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mi_homekit_bridge.bluetooth import ControllerResetRequired
+
+    async def stuck(_config: object, _state_dir: Path) -> None:
+        raise ControllerResetRequired("InProgress")
+
+    monkeypatch.setattr("mi_homekit_bridge.app.run_bridge", stuck)
+    (tmp_path / "config.toml").write_text(CONFIG)
+    argv = ["run", "--config", str(tmp_path / "config.toml"), "--state-dir", str(tmp_path)]
+    assert cli.main(argv) == 75
+
+
+def test_reset_bluetooth_only_after_exit_75(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def fake_reset(adapter: str) -> Path:
+        calls.append(adapter)
+        return Path("/sys/x/serial0-0")
+
+    monkeypatch.setattr("mi_homekit_bridge.bluetooth.reset_controller", fake_reset)
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    (tmp_path / "config.toml").write_text(CONFIG + '\n[bluetooth]\nadapter = "hci1"\n')
+    argv = ["reset-bluetooth", "--config", str(tmp_path / "config.toml"), "--if-exit-status", "75"]
+
+    monkeypatch.setenv("EXIT_STATUS", "0")
+    assert cli.main(argv) == 0
+    assert calls == []
+    monkeypatch.setenv("EXIT_STATUS", "75")
+    assert cli.main(argv) == 0
+    assert calls == ["hci1"]
+
+
+def test_reset_bluetooth_needs_root(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    assert cli.main(["reset-bluetooth", "--adapter", "hci0"]) == 1
+    assert "must run as root" in capsys.readouterr().err

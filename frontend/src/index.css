@@ -12,7 +12,11 @@
   --grid: #e1e0d9;
   --border: rgba(11, 11, 11, 0.1);
   --wash: rgba(11, 11, 11, 0.05);
+  /* Status palette: fixed in both modes, always paired with an icon and a label. */
+  --good: #0ca30c;
   --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -38,7 +42,10 @@
   --color-grid: var(--grid);
   --color-border: var(--border);
   --color-wash: var(--wash);
+  --color-good: var(--good);
   --color-warning: var(--warning);
+  --color-serious: var(--serious);
+  --color-critical: var(--critical);
   --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 

@@ -13,10 +13,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .history import HistoryStore, Sample, SensorInfo
+from . import __version__
+from .history import Event, HistoryStore, Sample, SensorInfo
+from .status import BridgeStatus, SensorStatus
 
-LIVING_ROOM = SensorInfo("A4:C1:38:00:00:01", "Living Room", "ble")
-BEDROOM = SensorInfo("A4:C1:38:00:00:02", "Bedroom", "ble")
+LIVING_ROOM = SensorInfo("A4:C1:38:00:00:01", "Living Room", "ble", 21.0)
+BEDROOM = SensorInfo("A4:C1:38:00:00:02", "Bedroom", "ble", 18.0)
 OUTDOOR = SensorInfo("weather", "Outdoor", "weather")
 DEMO_SENSORS = (LIVING_ROOM, BEDROOM, OUTDOOR)
 
@@ -100,7 +102,41 @@ def generate(store: HistoryStore, *, days: int = 400, end: int | None = None, se
         if ts % 900 == 0:
             samples.append(Sample(OUTDOOR.id, ts, round(out_t, 1), round(out_h)))
     store.add_samples(samples)
+    for event in _demo_events(end):
+        store.add_event(event)
     return len(samples)
+
+
+def _demo_events(end: int) -> list[Event]:
+    day = 86400
+    return [
+        Event(end - 9 * day, "started", data={"version": __version__}),
+        Event(end - 6 * day - 3600, "scan_silent", data={"minutes": 5, "error": ""}),
+        Event(end - 6 * day - 3540, "bluetooth_reset", data={"error": "InProgress"}),
+        Event(end - 6 * day - 3500, "started", data={"version": __version__}),
+        Event(end - 2 * day, "sensor_lost", BEDROOM.id, {"minutes": 60}),
+        Event(end - 2 * day + 1800, "sensor_back", BEDROOM.id, {"minutes": 90}),
+    ]
+
+
+def demo_status(now: float | None = None) -> BridgeStatus:
+    """A healthy bridge, for the ``demo`` command."""
+    ts = round(now if now is not None else time.time())
+    return BridgeStatus(
+        version=__version__,
+        started_at=ts - 9 * 86400,
+        bluetooth_state="running",
+        bluetooth_since=ts - 6 * 86400,
+        bluetooth_error=None,
+        scanning_mode="passive",
+        last_advertisement=ts - 2,
+        homekit_paired=True,
+        homekit_controllers=2,
+        sensors=(
+            SensorStatus(LIVING_ROOM.id, LIVING_ROOM.name, True, False, ts - 4, -64),
+            SensorStatus(BEDROOM.id, BEDROOM.name, True, False, ts - 9, -78),
+        ),
+    )
 
 
 def create_demo_store(path: Path, days: int = 400) -> HistoryStore:

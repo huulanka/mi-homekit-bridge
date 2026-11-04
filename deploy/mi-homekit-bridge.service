@@ -1,19 +1,31 @@
 [Unit]
 Description=BLE thermometer to HomeKit bridge
 Documentation=https://github.com/huulanka/mi-homekit-bridge
-After=bluetooth.target network-online.target
+After=bluetooth.target network-online.target time-sync.target
 Wants=bluetooth.target network-online.target
 
 [Service]
-Type=exec
+# The bridge reports readiness and pings the watchdog (sd_notify). If it hangs,
+# systemd restarts it.
+Type=notify
+NotifyAccess=main
+WatchdogSec=180
 ExecStart=/opt/mi-homekit-bridge/venv/bin/mi-homekit-bridge run \
     --config /etc/mi-homekit-bridge/config.toml \
     --state-dir /var/lib/mi-homekit-bridge
+# Exit status 75 means "the Bluetooth controller is stuck". Only then this resets
+# it by re-binding its kernel driver, which needs root ("+" skips User= and the
+# sandbox below for this one command, "-" ignores its failure). The bridge itself
+# never gets root. See docs/adr/0005-bluetooth-recovery.md.
+ExecStopPost=-+/opt/mi-homekit-bridge/venv/bin/mi-homekit-bridge reset-bluetooth \
+    --config /etc/mi-homekit-bridge/config.toml --if-exit-status 75
 # Bindkeys (MI_HOMEKIT_BRIDGE_BINDKEY_<MAC>=...). Read by systemd as root, so the
 # file can stay root-only (mode 600). Optional for plaintext BTHome sensors.
 EnvironmentFile=-/etc/mi-homekit-bridge/bindkeys.env
 Restart=on-failure
-RestartSec=15
+RestartSec=10
+# Exit status 2 is a configuration error: restarting does not help.
+RestartPreventExitStatus=2
 
 # Dedicated system user (deploy/mi-homekit-bridge.sysusers). DynamicUser= is not
 # used on purpose: D-Bus can only resolve dynamic users if nss-systemd is set up,

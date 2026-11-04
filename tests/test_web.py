@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from mi_homekit_bridge.history import HistoryStore, Sample, SensorInfo
+from mi_homekit_bridge.history import Event, HistoryStore, Sample, SensorInfo
+from mi_homekit_bridge.status import BridgeStatus, SensorStatus
 from mi_homekit_bridge.web import create_app, dew_point
 
 NOW = 1_793_740_500  # 2026-11-03 21:15 UTC
@@ -145,3 +146,86 @@ async def test_precompressed_assets_are_preferred(client: TestClient) -> None:  
     )
     assert response.headers["Content-Encoding"] == "br"
     assert await response.read() == b"brotli-bytes"
+
+
+def _status(*, bluetooth: str = "running", reporting: bool = True) -> BridgeStatus:
+    return BridgeStatus(
+        version="1.2.3",
+        started_at=NOW - 3600,
+        bluetooth_state=bluetooth,
+        bluetooth_since=NOW - 600,
+        bluetooth_error=None if bluetooth == "running" else "InProgress",
+        scanning_mode="passive",
+        last_advertisement=NOW - 2,
+        homekit_paired=True,
+        homekit_controllers=2,
+        sensors=(SensorStatus("A", "Living Room", reporting, not reporting, NOW - 5, -70),),
+    )
+
+
+async def _live_client(store: HistoryStore, static_dir: Path, status: BridgeStatus) -> TestClient:  # type: ignore[type-arg]
+    app = create_app(store, static_dir=static_dir, clock=lambda: NOW, status=lambda: status)
+    client: TestClient = TestClient(TestServer(app))  # type: ignore[type-arg]
+    await client.start_server()
+    return client
+
+
+async def test_status_and_health_when_everything_works(
+    store: HistoryStore, static_dir: Path
+) -> None:
+    client = await _live_client(store, static_dir, _status())
+    try:
+        data = await (await client.get("/api/status")).json()
+        assert data["bluetooth"]["state"] == "running"
+        assert data["sensors"][0] == {
+            "id": "A",
+            "name": "Living Room",
+            "reporting": True,
+            "problem": False,
+            "last_seen": NOW - 5,
+            "rssi": -70,
+        }
+        health = await client.get("/api/health")
+        assert health.status == 200
+        assert (await health.json())["problems"] == []
+    finally:
+        await client.close()
+
+
+async def test_health_reports_problems(store: HistoryStore, static_dir: Path) -> None:
+    client = await _live_client(store, static_dir, _status(bluetooth="failed", reporting=False))
+    try:
+        health = await client.get("/api/health")
+        assert health.status == 503
+        body = await health.json()
+        assert body["status"] == "degraded"
+        assert body["problems"] == ["bluetooth", "sensor:A"]
+    finally:
+        await client.close()
+
+
+async def test_no_live_status_in_demo_mode(client: TestClient) -> None:  # type: ignore[type-arg]
+    assert (await client.get("/api/status")).status == 404
+    assert (await client.get("/api/health")).status == 200
+
+
+async def test_events(client: TestClient, store: HistoryStore) -> None:  # type: ignore[type-arg]
+    store.add_event(Event(NOW - 60, "sensor_lost", "A", {"minutes": 60}))
+    data = await (await client.get("/api/events")).json()
+    assert data["events"] == [
+        {"ts": NOW - 60, "kind": "sensor_lost", "sensor_id": "A", "data": {"minutes": 60}}
+    ]
+
+
+async def test_overview_has_target_and_humidity_share(
+    client: TestClient,  # type: ignore[type-arg]
+    store: HistoryStore,
+) -> None:
+    store.upsert_sensors([SensorInfo("A", "Living Room", "ble", 20.0)])
+    store.add_samples([Sample("A", NOW - 7200 + i * 300, 21.0, 62.0) for i in range(6)])
+    sensors = {s["id"]: s for s in (await (await client.get("/api/overview")).json())["sensors"]}
+    assert sensors["A"]["target_temperature"] == 20.0
+    humid = sensors["A"]["humid"]
+    assert humid["threshold"] == 60.0
+    assert humid["share"] == pytest.approx(6 / 18, abs=0.001)  # 12 fixture samples at 50 %
+    assert sensors["weather"]["humid"] is None

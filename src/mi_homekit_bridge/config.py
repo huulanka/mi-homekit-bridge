@@ -13,7 +13,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 DEFAULT_BRIDGE_NAME = "Mi Thermometers"
 DEFAULT_PORT = 51826
@@ -30,9 +30,14 @@ WEATHER_PROVIDERS = ("open-meteo",)
 DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 8080
 
-_TOP_LEVEL_KEYS = {"bridge", "sensors", "history", "weather", "web"}
+DEFAULT_ADAPTER = "hci0"
+SCANNING_MODES = ("active", "passive")
+ScanningMode = Literal["active", "passive"]
+
+_TOP_LEVEL_KEYS = {"bridge", "sensors", "bluetooth", "history", "weather", "web"}
 _BRIDGE_KEYS = {"name", "port", "address", "stale_after_minutes"}
-_SENSOR_KEYS = {"name", "mac"}
+_SENSOR_KEYS = {"name", "mac", "target_temperature"}
+_BLUETOOTH_KEYS = {"adapter", "scanning_mode"}
 _HISTORY_KEYS = {"enabled", "interval_minutes"}
 _WEB_KEYS = {"enabled", "host", "port"}
 _WEATHER_KEYS = {
@@ -65,6 +70,19 @@ class SensorConfig:
 
     Read from the environment variable named by :func:`bindkey_env_var`.
     """
+    target_temperature: float | None = None
+    """Desired room temperature in °C, shown in the dashboard."""
+
+
+@dataclass(frozen=True, slots=True)
+class BluetoothConfig:
+    """The local Bluetooth adapter."""
+
+    adapter: str = DEFAULT_ADAPTER
+    """BlueZ adapter name, e.g. ``hci0``."""
+    scanning_mode: ScanningMode = "active"
+    """``passive`` only listens and never sends scan requests. It needs BlueZ
+    advertisement monitor support (BlueZ 5.56+, Linux 5.10+)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +131,7 @@ class BridgeConfig:
     port: int = DEFAULT_PORT
     address: str | None = None
     stale_after_minutes: int = DEFAULT_STALE_AFTER_MINUTES
+    bluetooth: BluetoothConfig = BluetoothConfig()
     history: HistoryConfig = HistoryConfig()
     weather: WeatherConfig = WeatherConfig()
     web: WebConfig = WebConfig()
@@ -194,6 +213,22 @@ def _opt_str(table: dict[str, Any], key: str, where: str) -> str | None:
     return value.strip()
 
 
+def _parse_bluetooth(data: dict[str, Any]) -> BluetoothConfig:
+    where = "[bluetooth]"
+    table = _table(data, "bluetooth", _BLUETOOTH_KEYS)
+    adapter = _opt_str(table, "adapter", where) or DEFAULT_ADAPTER
+    if not re.fullmatch(r"hci[0-9]{1,2}", adapter):
+        raise ConfigError(f"{where}: 'adapter' must be a BlueZ adapter name such as \"hci0\"")
+    mode = _opt_str(table, "scanning_mode", where) or "active"
+    if mode == "active":
+        scanning_mode: ScanningMode = "active"
+    elif mode == "passive":
+        scanning_mode = "passive"
+    else:
+        raise ConfigError(f"{where}: 'scanning_mode' must be one of: {', '.join(SCANNING_MODES)}")
+    return BluetoothConfig(adapter=adapter, scanning_mode=scanning_mode)
+
+
 def _parse_history(data: dict[str, Any]) -> HistoryConfig:
     table = _table(data, "history", _HISTORY_KEYS)
     return HistoryConfig(
@@ -273,12 +308,13 @@ def _parse_sensor(raw: Any, index: int, environ: Mapping[str, str]) -> SensorCon
     try:
         mac = normalize_mac(_require_str(raw, "mac", where))
         name = _require_str(raw, "name", where)
+        target = _float(raw, "target_temperature", 5, 30, where)
         env_var = bindkey_env_var(mac)
         try:
             bindkey = parse_bindkey(environ.get(env_var, ""))
         except ConfigError as err:
             raise ConfigError(f"${env_var}: {err}") from err
-        return SensorConfig(name=name, mac=mac, bindkey=bindkey)
+        return SensorConfig(name=name, mac=mac, bindkey=bindkey, target_temperature=target)
     except ConfigError as err:
         if str(err).startswith(where):
             raise
@@ -322,6 +358,7 @@ def parse_config(data: dict[str, Any], environ: Mapping[str, str] | None = None)
         if duplicates:
             raise ConfigError(f"duplicate sensor {attr}(s): {', '.join(duplicates)}")
 
+    bluetooth = _parse_bluetooth(data)
     history = _parse_history(data)
     weather = _parse_weather(data)
     web = _parse_web(data)
@@ -340,6 +377,7 @@ def parse_config(data: dict[str, Any], environ: Mapping[str, str] | None = None)
         port=port,
         address=address.strip() if address else None,
         stale_after_minutes=stale,
+        bluetooth=bluetooth,
         history=history,
         weather=weather,
         web=web,
