@@ -26,6 +26,7 @@ _GENERAL_FAULT = 1
 _BATTERY_NORMAL = 0
 _BATTERY_LOW = 1
 _NOT_CHARGEABLE = 2
+_AIR_QUALITY_UNKNOWN = 0
 
 
 def aid_for_mac(mac: str) -> int:
@@ -39,17 +40,27 @@ def aid_for_mac(mac: str) -> int:
 
 
 class ThermometerAccessory(Accessory):
-    """Temperature, humidity and battery of one sensor.
+    """Temperature, humidity and battery of one sensor, optionally air quality.
 
     The battery service is only added once a battery level is known: some sensors
-    (e.g. the LYWSD03MMC on recent stock firmware) never broadcast it, and HomeKit
+    (e.g. the LYWSD03MMC on recent stock firmware) rarely broadcast it, and HomeKit
     has no "unknown" value, so it would show 0 % forever.
+
+    Air quality stands for the mould risk at the coldest wall spots (see
+    :func:`mi_homekit_bridge.climate.air_quality`), so Apple Home shows when a room
+    needs airing.
     """
 
     category = CATEGORY_SENSOR
 
     def __init__(
-        self, driver: AccessoryDriver, name: str, mac: str, *, battery: bool = False
+        self,
+        driver: AccessoryDriver,
+        name: str,
+        mac: str,
+        *,
+        battery: bool = False,
+        air_quality: bool = False,
     ) -> None:
         super().__init__(driver, name, aid=aid_for_mac(mac))
         self.set_info_service(
@@ -67,6 +78,10 @@ class ThermometerAccessory(Accessory):
             temperature.configure_char("StatusFault", value=_GENERAL_FAULT),
             humidity.configure_char("StatusFault", value=_GENERAL_FAULT),
         ]
+        self._air_quality: Characteristic | None = None
+        if air_quality:
+            service = self.add_preload_service("AirQualitySensor")
+            self._air_quality = service.configure_char("AirQuality", value=_AIR_QUALITY_UNKNOWN)
         self._battery: tuple[Characteristic, Characteristic] | None = None
         """``(BatteryLevel, StatusLowBattery)`` once the battery service exists."""
         if battery:
@@ -99,6 +114,11 @@ class ThermometerAccessory(Accessory):
         low_char.set_value(_BATTERY_LOW if level < LOW_BATTERY_PERCENT else _BATTERY_NORMAL)
         return added
 
+    def set_air_quality(self, value: int) -> None:
+        """HomeKit air quality: 0 unknown, 1 excellent … 5 poor."""
+        if self._air_quality is not None:
+            self._air_quality.set_value(max(0, min(5, value)))
+
     def set_fault(self, fault: bool) -> None:
         """Flag the sensor as faulty in HomeKit, e.g. when it stopped reporting."""
         value = _GENERAL_FAULT if fault else _NO_FAULT
@@ -112,6 +132,10 @@ class ThermometerAccessory(Accessory):
     @property
     def humidity(self) -> float:
         return float(self._humidity.get_value())
+
+    @property
+    def air_quality(self) -> int | None:
+        return None if self._air_quality is None else int(self._air_quality.get_value())
 
     @property
     def battery(self) -> int | None:
@@ -168,8 +192,10 @@ def create_bridge(
 ) -> tuple[Bridge, dict[str, ThermometerAccessory]]:
     """Create the bridge and one accessory per configured sensor, keyed by MAC.
 
-    Sensors in ``with_battery`` (MACs) get their battery service right away.
+    Sensors in ``with_battery`` (MACs) get their battery service right away. With
+    outdoor data, each accessory also shows the mould risk as air quality.
     """
+    air_quality = config.air_quality and config.weather.enabled
     bridge = Bridge(driver, config.name)
     bridge.set_info_service(
         firmware_revision=__version__,
@@ -181,7 +207,11 @@ def create_bridge(
     seen_aids: dict[int, str] = {}
     for sensor in config.sensors:
         accessory = ThermometerAccessory(
-            driver, sensor.name, sensor.mac, battery=sensor.mac in with_battery
+            driver,
+            sensor.name,
+            sensor.mac,
+            battery=sensor.mac in with_battery,
+            air_quality=air_quality,
         )
         if accessory.aid in seen_aids:  # pragma: no cover - 1 in 2^31 chance
             raise ValueError(f"aid collision between {seen_aids[accessory.aid]} and {sensor.mac}")

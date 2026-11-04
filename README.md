@@ -11,14 +11,15 @@ Raspberry Pi (or any Linux box with Bluetooth).
 LYWSD03MMC ──BLE advertisements──▶ mi-homekit-bridge ──HomeKit (HAP)──▶ Home app / HomePod
 ```
 
-Each sensor shows up in the Home app with temperature, humidity and battery level.
-The bridge only listens to the advertisements the sensors broadcast anyway; it never
-connects to them.
+Each sensor shows up in the Home app with temperature, humidity and battery level,
+and, with outdoor data, the **mould risk as air quality**. The bridge only listens
+to the advertisements the sensors broadcast anyway; it never connects to them.
 
 Optionally it also keeps a **measurement history** in a local SQLite database,
-records the **outdoor temperature and humidity** for your postal code from a weather
-service, and serves a small **web dashboard** to explore it all over days, months
-and years.
+records the **outdoor weather** for your postal code, and serves a small **web
+dashboard** to explore it all over days, months and years: absolute humidity,
+mould risk at cold walls, detected airing, time in the target temperature range,
+heating degree days and a weekly report.
 
 ![Dashboard with sample data](docs/screenshots/dashboard-light.png)
 
@@ -132,31 +133,49 @@ setup code manually. The setup code is also stored in
 
 An optional, read-only web dashboard built into the bridge (no extra service):
 
-- **Overview**: one card per room with temperature, humidity, dew point, battery,
-  signal strength, today's range, the difference to outdoor and the last 24 hours.
-- **Target temperature** (optional, per room): whether the room is too warm or too
-  cold (median of the last 3 hours, so airing does not count and a turned thermostat
-  shows within hours) and which way to turn the radiator thermostat, in marks on the
-  dial (one mark is roughly 1 °C). Deliberately relative: what a dial position means
-  differs a lot between rooms and flats. No advice to turn down when it is above
-  15 °C outdoors.
-- **Humidity check**: how much of the last 7 days the humidity was above 60 %. Rarely
-  is fine; more than half of the time means the room stays damp (mould risk).
+- **Overview**: one card per room with temperature, relative and absolute humidity,
+  dew point, battery (with its age), signal strength, today's range, the difference
+  to outdoor and the last 24 hours. Three chips open the details:
+  - **Target temperature** (optional, per room): whether the room is too warm or too
+    cold (median of the last 3 hours, so airing does not count and a turned
+    thermostat shows within hours) and which way to turn the radiator thermostat, in
+    marks on the dial (one mark is roughly 1 °C). Deliberately relative: what a dial
+    position means differs a lot between rooms and flats. No advice to turn down
+    when it is above 15 °C outdoors.
+  - **Mould risk** at the coldest wall spots, now and over the last 7 days (see
+    [Humidity, mould and airing](#humidity-mould-and-airing)).
+  - **Airing**: whether airing helps right now and for how long, and how often the
+    room was aired today and how long it took to get warm again.
+- **Weekly report**: the last 7 complete days against the week before: mean
+  temperature, time in the target range, hours with mould risk, airings per day,
+  warm-up time after airing, water content, heating degree days and precipitation.
 - **Live status**: a banner when Bluetooth fails, the bridge is not paired with Apple
-  Home, or the dashboard has lost its connection (then it says how old the data is).
-- **Events**: sensor outages, Bluetooth recoveries and controller resets, kept in the
-  database so they survive reboots.
+  Home, the Raspberry Pi reports under-voltage, or the dashboard has lost its
+  connection (then it says how old the data is). CPU temperature and power supply
+  in the footer.
+- **Events**: sensor outages, Bluetooth recoveries, controller resets and
+  under-voltage, kept in the database so they survive reboots. Restarts and updates
+  are summarised.
 - **History**: all sensors in one chart for 24 hours up to everything recorded.
-  Longer ranges show averages with a min–max band.
-- **Indoor minus outdoor**: how much warmer (or more humid) it is inside.
-- **Daily profile**: the typical course of a day by hour.
-- **Hour × day heatmap**: patterns such as heating schedules, airing or sun.
-- Every chart has a table view. CSV export of all data. Light and dark mode follow
-  the system, the language follows the browser (English, German).
+  Longer ranges show averages with a min–max band, dashed target lines, dots for
+  detected airing and gray bands where no data was recorded.
+- **Mould risk at cold spots**: the estimated wall humidity over time with the 70 %
+  and 80 % limits.
+- **Indoor minus outdoor**: temperature, or the water content (g/m³) for humidity.
+  Relative humidity cannot be compared between a warm room and cold outdoor air.
+- **Time in target range**: per day (or month) the share of time too cold, on
+  target and too warm.
+- **Weather**: solar radiation, wind and precipitation as small multiples.
+- **Heating degree days** (G20/15) per day or month.
+- **Daily profile**, **hour × day heatmap** and, for a year, a **calendar** of daily
+  means.
+- Temperature, relative and absolute humidity for every chart. Every chart has a
+  table view. CSV export of all data. Light and dark mode follow the system, the
+  language follows the browser (English, German).
 
-| Patterns | Phone, dark mode |
-|---|---|
-| ![Daily profile and heatmap](docs/screenshots/patterns-light.png) | ![Mobile dark mode](docs/screenshots/mobile-dark.png) |
+| History, mould risk, time in target | Patterns | Phone, dark mode |
+|---|---|---|
+| ![History with target lines and airing, mould risk and time in target](docs/screenshots/charts-light.png) | ![Daily profile and heatmap](docs/screenshots/patterns-light.png) | ![Mobile dark mode](docs/screenshots/mobile-dark.png) |
 
 *Screenshots use generated sample data (`mi-homekit-bridge demo`).*
 
@@ -195,8 +214,9 @@ uv run mi-homekit-bridge demo      # http://127.0.0.1:8080 with 400 days of samp
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/overview` | latest values, today's range and a 24 h sparkline per sensor |
-| `GET /api/series?range=24h\|7d\|30d\|1y\|all` | min/avg/max buckets (5 min, 30 min, 1 h or 1 day) |
+| `GET /api/overview` | latest values, battery and its age, today's range, a 24 h sparkline, mould risk, airing advice and today's airings per sensor |
+| `GET /api/series?range=24h\|7d\|30d\|1y\|all` | min/avg/max buckets (5 min, 30 min, 1 h or 1 day) of temperature, relative and absolute humidity; wall humidity, weather, outages and (up to 30 days) detected airings |
+| `GET /api/daily?days=15\|31\|92\|366` | statistics per day: means, time in the target range, mould risk, airings, heating degree days, sun, wind, precipitation |
 | `GET /api/profile?days=7\|30\|90\|365` | average per hour of day |
 | `GET /api/heatmap?days=14\|30\|90` | average per day and hour |
 | `GET /api/export.csv` | all samples |
@@ -230,11 +250,13 @@ name = "Mi Thermometers"     # bridge name in the Home app
 port = 51826                 # HomeKit TCP port
 # address = "192.168.1.10"   # address announced via mDNS, auto-detected by default
 stale_after_minutes = 60     # flag a sensor as faulty after this long without data
+air_quality = true           # mould risk as HomeKit air quality (needs [weather])
 
 [[sensors]]
 name = "Living Room"
 mac = "A4:C1:38:00:00:01"
 target_temperature = 21.0    # optional, °C, shown in the dashboard
+surface_factor = 0.8         # optional, coldest wall spots (fRsi, default 0.7)
 
 [bluetooth]                  # optional
 adapter = "hci0"
@@ -277,14 +299,46 @@ sudo sqlite3 /var/lib/mi-homekit-bridge/history.db ".backup '/tmp/history-backup
 
 ### Outdoor weather
 
-With `[weather]` enabled, the current outdoor temperature and humidity are fetched
-from [Open-Meteo](https://open-meteo.com) and stored like an additional sensor.
+With `[weather]` enabled, the current outdoor temperature, humidity, solar radiation,
+wind speed and precipitation are fetched from [Open-Meteo](https://open-meteo.com)
+and stored like an additional sensor.
 Open-Meteo is free for non-commercial use and needs no API key. A postal code is
 resolved to coordinates once per start with OpenStreetMap's
 [Nominatim](https://nominatim.org) (geocoding data © OpenStreetMap contributors,
 ODbL); with `latitude`/`longitude` no lookup happens at all. Weather data by
 [Open-Meteo.com](https://open-meteo.com), licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+### Humidity, mould and airing
+
+Relative humidity depends on the temperature: 70 % at 5 °C outdoors is less than
+half the water of 60 % at 22 °C indoors. The dashboard therefore also shows the
+**absolute humidity** (water content in g/m³), which is what airing exchanges.
+
+Mould does not grow in the middle of the room but where a wall is cold: corners,
+window reveals, the junction of wall and sloped roof. The bridge estimates the
+temperature there with the temperature factor fRsi of DIN 4108-2,
+`θsi = θoutdoor + fRsi · (θroom − θoutdoor)`, and from it the relative humidity at
+that spot. Above 70 % it says *caution*, above 80 % (the limit of DIN 4108-2)
+*mould risk*. Set `surface_factor` per room: 0.7 is the standard's minimum and the
+default, well insulated new buildings reach about 0.8, uninsulated old ones 0.6
+or less. Without outdoor data it falls back to the room humidity (caution from
+60 %, risk from 70 %).
+
+Airing is **recommended** when the wall humidity reaches the caution level and the
+outdoor air holds at least 1 g/m³ less water, with the usual rule of thumb for the
+duration (5 minutes below 5 °C outdoors up to 25 minutes in summer). If it is damp
+inside but the outdoor air is not drier, it advises against airing.
+
+**Airing is detected** from the readings: a drop of at least 1 °C within 15
+minutes together with a loss of at least 0.8 g/m³ of water. A heating that turns
+off cannot cool a room that fast, and a sensor carried into another room keeps its
+water content. The room counts as warm again once it is back within 0.5 °C or 20 %
+of the drop. This only works in the heating season.
+
+In Apple Home each thermometer shows the wall humidity as **air quality**: excellent
+below 60 %, good below 70 %, fair below 80 %, inferior below 90 %, poor above.
+Disable it with `air_quality = false` in `[bridge]`.
 
 ## Commands
 

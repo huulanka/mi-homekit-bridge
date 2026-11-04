@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { pick, type Metric, type Series } from '../api'
-import { formatDate, formatDateTime } from '../format'
+import { formatDate, formatDateTime, formatKelvin, formatMinutes } from '../format'
 import { t } from '../i18n'
 import type { Theme } from '../theme'
 import { stepMs, withGaps } from '../data'
@@ -18,7 +18,18 @@ interface Props {
 
 interface AxisParam {
   seriesId?: string
+  axisValue?: number
   value?: [number, number | null]
+}
+
+/** The point of a series closest to `ts` (ms) with a value. */
+function nearest(values: readonly (readonly [number, number | null])[], ts: number): [number, number] | null {
+  let best: [number, number] | null = null
+  for (const [x, y] of values) {
+    if (y === null) continue
+    if (!best || Math.abs(x - ts) < Math.abs(best[0] - ts)) best = [x, y]
+  }
+  return best
 }
 
 function buildHistoryOption(data: Series, metric: Metric, theme: Theme, colors: Record<string, string>): ChartOption {
@@ -28,12 +39,21 @@ function buildHistoryOption(data: Series, metric: Metric, theme: Theme, colors: 
   const ranges = new Map<string, Map<number, [number | null, number | null]>>()
   const series: NonNullable<ChartOption['series']> = []
   const names = new Map<string, string>()
+  const targets = metric === 'temperature' ? data.sensors.map((s) => s.target_temperature).filter((v): v is number => v !== null) : []
+  const gaps = data.gaps ?? []
+  const airings = data.airings ?? []
 
-  for (const sensor of data.sensors) {
+  for (const [index, sensor] of data.sensors.entries()) {
     const color = colors[sensor.id] ?? theme.series[0]
     names.set(sensor.id, sensor.name)
     const values = sensor.points.map((p) => [p[0] * 1000, ...pick(p, metric)] as const)
     ranges.set(sensor.id, new Map(values.map(([ts, min, , max]) => [ts, [min, max]])))
+    const averages = values.map(([ts, , avg]) => [ts, avg] as const)
+    const marks = airings
+      .filter((a) => a.sensor_id === sensor.id)
+      .map((a) => nearest(averages, a.lowest * 1000))
+      .filter((m): m is [number, number] => m !== null)
+    const target = metric === 'temperature' ? sensor.target_temperature : null
     series.push({
       id: `avg:${sensor.id}`,
       name: sensor.name,
@@ -49,6 +69,34 @@ function buildHistoryOption(data: Series, metric: Metric, theme: Theme, colors: 
         : { show: false },
       labelLayout: { hideOverlap: true },
       z: 3,
+      markLine:
+        target !== null
+          ? {
+              silent: true,
+              symbol: 'none',
+              label: { show: false },
+              lineStyle: { color, width: 1.5, type: 'dashed' },
+              data: [{ yAxis: target }],
+            }
+          : undefined,
+      markPoint: marks.length
+        ? {
+            silent: true,
+            symbol: 'circle',
+            symbolSize: 9,
+            label: { show: false },
+            itemStyle: { color, borderColor: theme.surface, borderWidth: 2 },
+            data: marks.map((coord) => ({ name: 'airing', coord })),
+          }
+        : undefined,
+      markArea:
+        index === 0 && gaps.length
+          ? {
+              silent: true,
+              itemStyle: { color: theme.gap },
+              data: gaps.map(([start, end]) => [{ xAxis: start * 1000 }, { xAxis: end * 1000 }]),
+            }
+          : undefined,
     })
     if (aggregated) {
       const band = `band:${sensor.id}`
@@ -97,11 +145,30 @@ function buildHistoryOption(data: Series, metric: Metric, theme: Theme, colors: 
       formatter: (raw: unknown) => {
         const params = (Array.isArray(raw) ? raw : [raw]) as AxisParam[]
         const rows = params.filter((p) => p.seriesId?.startsWith('avg:') && p.value && p.value[1] !== null)
-        const ts = rows[0]?.value?.[0]
+        const ts = rows[0]?.value?.[0] ?? params[0]?.axisValue
         if (ts === undefined) return ''
         const title = data.bucket === 'day' ? formatDate(ts / 1000) : formatDateTime(ts / 1000)
+        const gap = gaps.find(([start, end]) => ts / 1000 >= start && ts / 1000 <= end)
+        const notes = airings
+          .filter((a) => a.lowest * 1000 >= ts && a.lowest * 1000 < ts + step)
+          .map((a) =>
+            tooltipRow(
+              colors[a.sensor_id] ?? theme.ink,
+              t('airedTooltip', {
+                drop: formatKelvin(a.drop),
+                recovery:
+                  a.recovery_minutes === null
+                    ? t('notRecovered')
+                    : t('recoveredAfter', { duration: formatMinutes(a.recovery_minutes) }),
+              }),
+              names.get(a.sensor_id) ?? '',
+            ),
+          )
+        if (rows.length === 0 && !gap) return ''
         return (
           tooltipTitle(title) +
+          (gap ? tooltipTitle(t(`gap_${gap[2]}`)) : '') +
+          notes.join('') +
           rows
             .map((p) => {
               const id = p.seriesId!.slice(4)
@@ -117,7 +184,16 @@ function buildHistoryOption(data: Series, metric: Metric, theme: Theme, colors: 
       },
     },
     xAxis: timeAxis(theme),
-    yAxis: valueAxis(theme, metric),
+    yAxis: {
+      ...valueAxis(theme, metric),
+      // Keep the dashed target lines in view.
+      ...(targets.length
+        ? {
+            min: (extent: { min: number }) => Math.floor(Math.min(extent.min, Math.min(...targets) - 0.5)),
+            max: (extent: { max: number }) => Math.ceil(Math.max(extent.max, Math.max(...targets) + 0.5)),
+          }
+        : {}),
+    },
     dataZoom: fineScreen
       ? [{ type: 'inside', zoomOnMouseWheel: 'ctrl', moveOnMouseMove: true, moveOnMouseWheel: false }]
       : [],

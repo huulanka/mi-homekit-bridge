@@ -247,3 +247,18 @@ def test_target_temperature() -> None:
 def test_invalid_target_temperature(target: object) -> None:
     with pytest.raises(ConfigError, match="target_temperature"):
         parse_config({"sensors": [_sensor(target_temperature=target)]}, environ={})
+
+
+def test_surface_factor_and_air_quality() -> None:
+    config = parse_config({"sensors": [_sensor(surface_factor=0.8)]}, environ={})
+    assert config.sensors[0].surface_factor == 0.8
+    assert config.air_quality is True
+    off = parse_config({"bridge": {"air_quality": False}, "sensors": [_sensor()]}, environ={})
+    assert off.air_quality is False
+    assert off.sensors[0].surface_factor is None
+
+
+@pytest.mark.parametrize("factor", [0.4, 1.0, "0.8"])
+def test_invalid_surface_factor(factor: object) -> None:
+    with pytest.raises(ConfigError, match="surface_factor"):
+        parse_config({"sensors": [_sensor(surface_factor=factor)]}, environ={})

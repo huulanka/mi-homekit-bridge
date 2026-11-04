@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { banners } from './advice'
 import {
   pick,
+  type Daily,
   type Events,
   type Heatmap,
   type Metric,
@@ -11,24 +12,55 @@ import {
   type Series,
   type Status,
 } from './api'
+import { CalendarChart } from './charts/CalendarChart'
+import { DegreeDaysChart } from './charts/DegreeDaysChart'
 import { DeltaChart } from './charts/DeltaChart'
 import { HeatmapChart } from './charts/HeatmapChart'
 import { HistoryChart } from './charts/HistoryChart'
+import { MouldChart } from './charts/MouldChart'
 import { ProfileChart } from './charts/ProfileChart'
+import { TargetChart } from './charts/TargetChart'
+import { WeatherChart } from './charts/WeatherChart'
 import { ChartCard } from './components/ChartCard'
 import { FilterBar, RANGES } from './components/FilterBar'
 import { EventsCard } from './components/EventsCard'
 import { DownloadIcon } from './components/Icons'
 import { RoomCard } from './components/RoomCard'
 import { StatusBanners } from './components/StatusBanner'
-import { HOURS, computeDeltas, heatmapCells, profileValues } from './data'
-import { formatDate, formatDateTime, formatDelta, formatTime, formatValue } from './format'
-import { t, type MessageKey } from './i18n'
+import { WeeklyReport } from './components/WeeklyReport'
+import { HOURS, computeDeltas, dayValue, hasWeather, heatmapCells, mouldSensors, profileValues } from './data'
+import {
+  formatDate,
+  formatDateTime,
+  formatDelta,
+  formatNumber,
+  formatPercent,
+  formatShortDate,
+  formatTime,
+  formatValue,
+} from './format'
+import { locale, t, type MessageKey } from './i18n'
+import {
+  degreeDayPeriods,
+  isOutdoorDay,
+  isRoomDay,
+  localDay,
+  targetPeriods,
+  weeklyReport,
+  type DailySensor,
+} from './report'
 import { colorFor, useTheme } from './theme'
 import { useApi } from './useApi'
 
 const PROFILE_DAYS: Record<RangeKey, number> = { '24h': 7, '7d': 7, '30d': 30, '1y': 365, all: 365 }
 const HEATMAP_DAYS: Record<RangeKey, number> = { '24h': 14, '7d': 14, '30d': 30, '1y': 90, all: 90 }
+const DAILY_DAYS: Record<RangeKey, number> = { '24h': 15, '7d': 15, '30d': 31, '1y': 366, all: 366 }
+/** Days shown in the per-day charts (time in target, degree days). */
+const PERIOD_DAYS: Record<RangeKey, number> = { '24h': 7, '7d': 7, '30d': 31, '1y': 366, all: 366 }
+
+const monthFormat = new Intl.DateTimeFormat(locale, { month: 'short', year: '2-digit' })
+const periodLabel = (key: string) =>
+  key.length === 7 ? monthFormat.format(new Date(`${key}-15T12:00:00`)) : formatShortDate(new Date(`${key}T12:00:00`))
 
 function usePersisted<T extends string>(key: string, allowed: readonly T[], fallback: T) {
   const [value, setValue] = useState<T>(() => {
@@ -45,7 +77,7 @@ function usePersisted<T extends string>(key: string, allowed: readonly T[], fall
 export default function App() {
   const theme = useTheme()
   const [range, setRange] = usePersisted<RangeKey>('range', RANGES, '7d')
-  const [metric, setMetric] = usePersisted<Metric>('metric', ['temperature', 'humidity'], 'temperature')
+  const [metric, setMetric] = usePersisted<Metric>('metric', ['temperature', 'humidity', 'absolute'], 'temperature')
 
   const overview = useApi<Overview>('/api/overview', 60_000)
   const series = useApi<Series>(`/api/series?range=${range}`, 300_000)
@@ -53,6 +85,8 @@ export default function App() {
   const heatmap = useApi<Heatmap>(`/api/heatmap?days=${HEATMAP_DAYS[range]}`, 900_000)
   const status = useApi<Status>('/api/status', 30_000)
   const events = useApi<Events>('/api/events', 120_000)
+  const report = useApi<Daily>('/api/daily?days=15', 900_000)
+  const daily = useApi<Daily>(`/api/daily?days=${DAILY_DAYS[range]}`, 900_000)
 
   // A sensor keeps its color slot whatever is filtered: assigned by overview order.
   const colors = useMemo(() => {
@@ -73,6 +107,27 @@ export default function App() {
     () => Object.fromEntries((overview.data?.sensors ?? []).map((s) => [s.id, s.name])),
     [overview.data],
   )
+  const weekly = useMemo(
+    () => (report.data && now ? weeklyReport(report.data, localDay(now)) : null),
+    [report.data, now],
+  )
+  const by = range === '1y' || range === 'all' ? 'month' : 'day'
+  const periodDays = useMemo(() => {
+    if (!daily.data) return []
+    return daily.data.sensors.map((sensor) => ({ ...sensor, days: sensor.days.slice(-PERIOD_DAYS[range]) }))
+  }, [daily.data, range])
+  const targetRooms = periodDays
+    .filter((s) => s.kind === 'ble' && s.target_temperature !== null)
+    .map((sensor) => ({ sensor, periods: targetPeriods(sensor.days.filter(isRoomDay), by) }))
+    .filter((room) => room.periods.length > 0)
+  const outdoorDaily = periodDays.find((s) => s.kind === 'weather')
+  // Only complete days: today's mean so far would overstate the cold morning.
+  const today = now ? localDay(now) : ''
+  const degreeDays = outdoorDaily
+    ? degreeDayPeriods(outdoorDaily.days.filter(isOutdoorDay).filter((d) => d.day < today), by)
+    : []
+  const deltaMetric = metric === 'temperature' ? 'temperature' : 'absolute'
+  const pi = status.data?.system
 
   return (
     <div className="mx-auto max-w-6xl px-4 pt-[max(1.5rem,env(safe-area-inset-top))] pb-10 sm:px-6">
@@ -85,7 +140,7 @@ export default function App() {
         )}
       </header>
 
-      <StatusBanners banners={banners(status.data, offlineSince)} now={now} />
+      <StatusBanners banners={banners(status.data, offlineSince, now)} now={now} />
 
       {overview.error && !overview.data && (
         <p className="mt-6 rounded-2xl border border-border bg-surface p-5 text-ink-2">
@@ -113,6 +168,12 @@ export default function App() {
             ))}
           </section>
 
+          {report.data && (
+            <div className="mt-4">
+              <WeeklyReport report={weekly} colors={colors} />
+            </div>
+          )}
+
           <div className="mt-4">
             <FilterBar range={range} metric={metric} onRange={setRange} onMetric={setMetric} />
           </div>
@@ -121,24 +182,82 @@ export default function App() {
             {series.data && (
               <ChartCard
                 title={`${t('history')} · ${t(metric)}`}
-                hint={
+                hint={[
                   series.data.bucket === 300
                     ? t('historyHintRaw')
-                    : t('historyHint', { bucket: t(`bucket_${series.data.bucket}` as MessageKey) })
-                }
+                    : t('historyHint', { bucket: t(`bucket_${series.data.bucket}` as MessageKey) }),
+                  t('historyMarks'),
+                ].join(' ')}
                 table={historyTable(series.data, metric)}
               >
                 <HistoryChart data={series.data} metric={metric} theme={theme} colors={colors} dimmed={series.loading} />
               </ChartCard>
             )}
 
+            {series.data && mouldSensors(series.data).length > 0 && (
+              <ChartCard title={t('mouldChart')} hint={t('mouldChartHint')} table={mouldTable(series.data)}>
+                <MouldChart data={series.data} theme={theme} colors={colors} dimmed={series.loading} />
+              </ChartCard>
+            )}
+
             {series.data && outdoor && (
               <ChartCard
-                title={`${t('delta')} · ${t(metric)}`}
-                hint={t('deltaHint')}
-                table={deltaTable(series.data, metric)}
+                title={`${t('delta')} · ${t(deltaMetric)}`}
+                hint={deltaMetric === 'temperature' ? t('deltaHint') : t('deltaHintAbsolute')}
+                table={deltaTable(series.data, deltaMetric)}
               >
-                <DeltaChart data={series.data} metric={metric} theme={theme} colors={colors} dimmed={series.loading} />
+                <DeltaChart data={series.data} metric={deltaMetric} theme={theme} colors={colors} dimmed={series.loading} />
+              </ChartCard>
+            )}
+
+            {targetRooms.length > 0 && (
+              <ChartCard
+                title={t('targetChart')}
+                hint={t('targetChartHint', { period: t(`period_${by}`) })}
+                table={targetTable(targetRooms)}
+              >
+                <div className="grid gap-x-6 gap-y-2 lg:grid-cols-2">
+                  {targetRooms.map(({ sensor, periods }) => (
+                    <figure key={sensor.id} className="m-0">
+                      <figcaption className="flex items-center gap-2 text-sm text-ink-2">
+                        <span className="size-2.5 rounded-full" style={{ background: colors[sensor.id] }} aria-hidden />
+                        {sensor.name} · {t('target', { value: formatValue(sensor.target_temperature, 'temperature') })}
+                      </figcaption>
+                      <TargetChart periods={periods} label={periodLabel} theme={theme} name={sensor.name} dimmed={daily.loading} />
+                    </figure>
+                  ))}
+                </div>
+              </ChartCard>
+            )}
+
+            {series.data && hasWeather(series.data) && (
+              <ChartCard
+                title={t('weather')}
+                hint={t('weatherHint', { bucket: t(`bucket_${series.data.bucket}` as MessageKey) })}
+                table={weatherTable(series.data)}
+              >
+                <WeatherChart
+                  data={series.data}
+                  theme={theme}
+                  color={outdoor ? (colors[outdoor.id] ?? theme.series[0]!) : theme.series[0]!}
+                  dimmed={series.loading}
+                />
+              </ChartCard>
+            )}
+
+            {degreeDays.length > 0 && outdoor && (
+              <ChartCard
+                title={t('degreeDays')}
+                hint={t('degreeDaysHint', { total: formatNumber(degreeDays.reduce((sum, p) => sum + p.degrees, 0), 0) })}
+                table={degreeDaysTable(degreeDays)}
+              >
+                <DegreeDaysChart
+                  periods={degreeDays}
+                  label={periodLabel}
+                  color={colors[outdoor.id] ?? theme.series[0]!}
+                  theme={theme}
+                  dimmed={daily.loading}
+                />
               </ChartCard>
             )}
 
@@ -175,6 +294,30 @@ export default function App() {
             )}
           </div>
 
+          {(range === '1y' || range === 'all') && daily.data && (
+            <div className="mt-4">
+              <ChartCard
+                title={`${t('calendar')} · ${t(metric)}`}
+                hint={t('calendarHint')}
+                table={calendarTable(daily.data.sensors, metric)}
+              >
+                <div className="grid gap-2">
+                  {daily.data.sensors
+                    .filter((s) => s.days.length > 0)
+                    .map((sensor) => (
+                      <figure key={sensor.id} className="m-0">
+                        <figcaption className="flex items-center gap-2 text-sm text-ink-2">
+                          <span className="size-2.5 rounded-full" style={{ background: colors[sensor.id] }} aria-hidden />
+                          {sensor.name}
+                        </figcaption>
+                        <CalendarChart days={sensor.days} metric={metric} theme={theme} name={sensor.name} dimmed={daily.loading} />
+                      </figure>
+                    ))}
+                </div>
+              </ChartCard>
+            </div>
+          )}
+
           {events.data && (
             <div className="mt-4">
               <EventsCard events={events.data.events} names={names} />
@@ -188,6 +331,13 @@ export default function App() {
                 homekit: status.data.homekit.paired
                   ? t('homekitPaired', { n: status.data.homekit.controllers })
                   : t('homekitNotPaired'),
+                pi:
+                  pi && pi.cpu_temperature !== null
+                    ? t('systemPi', {
+                        temperature: formatValue(pi.cpu_temperature, 'temperature'),
+                        power: pi.undervoltage_count ? t('power_issue', { n: pi.undervoltage_count }) : t('power_ok'),
+                      })
+                    : '',
                 version: status.data.version,
               })}
             </p>
@@ -229,6 +379,81 @@ function historyTable(data: Series, metric: Metric) {
         }
       })
       return [...byTs.entries()].sort((a, b) => b[0] - a[0]).map(([ts, row]) => [format(ts), ...row])
+    },
+  }
+}
+
+function mouldTable(data: Series) {
+  const sensors = mouldSensors(data)
+  const format = data.bucket === 'day' ? formatDate : formatDateTime
+  return {
+    columns: [t('time'), ...sensors.map((s) => s.name)],
+    rows: () => {
+      const byTs = new Map<number, string[]>()
+      sensors.forEach((sensor, column) => {
+        for (const [ts, value] of sensor.surface ?? []) {
+          const row = byTs.get(ts) ?? Array<string>(sensors.length).fill('–')
+          row[column] = formatValue(value, 'humidity')
+          byTs.set(ts, row)
+        }
+      })
+      return [...byTs.entries()].sort((a, b) => b[0] - a[0]).map(([ts, row]) => [format(ts), ...row])
+    },
+  }
+}
+
+function targetTable(rooms: { sensor: DailySensor; periods: ReturnType<typeof targetPeriods> }[]) {
+  return {
+    columns: [t('day'), ...rooms.flatMap(({ sensor }) => [`${sensor.name}: ${t('cold')}`, t('onTargetShort'), t('warm')])],
+    rows: () => {
+      const keys = [...new Set(rooms.flatMap((r) => r.periods.map((p) => p.key)))].sort().reverse()
+      return keys.map((key) => [
+        periodLabel(key),
+        ...rooms.flatMap(({ periods }) => {
+          const period = periods.find((p) => p.key === key)
+          return period ? [formatPercent(period.cold), formatPercent(period.onTarget), formatPercent(period.warm)] : ['–', '–', '–']
+        }),
+      ])
+    },
+  }
+}
+
+function degreeDaysTable(periods: ReturnType<typeof degreeDayPeriods>) {
+  return {
+    columns: [t('day'), t('degreeDays'), t('temperature')],
+    rows: () =>
+      [...periods]
+        .reverse()
+        .map((p) => [periodLabel(p.key), formatNumber(p.degrees), formatValue(p.temperature, 'temperature')]),
+  }
+}
+
+function weatherTable(data: Series) {
+  const weather = data.sensors.find((s) => s.kind === 'weather')?.weather ?? []
+  const format = data.bucket === 'day' ? formatDate : formatDateTime
+  const number = (value: number | null, unit: string) => (value === null ? '–' : `${formatNumber(value)} ${unit}`)
+  return {
+    columns: [t('time'), t('sun'), t('wind'), t('rain')],
+    rows: () =>
+      [...weather]
+        .reverse()
+        .map(([ts, sun, wind, rain]) => [format(ts), number(sun, 'W/m²'), number(wind, 'km/h'), number(rain, 'mm')]),
+  }
+}
+
+function calendarTable(sensors: DailySensor[], metric: Metric) {
+  return {
+    columns: [t('day'), ...sensors.map((s) => s.name)],
+    rows: () => {
+      const byDay = new Map<string, string[]>()
+      sensors.forEach((sensor, column) => {
+        for (const day of sensor.days) {
+          const row = byDay.get(day.day) ?? Array<string>(sensors.length).fill('–')
+          row[column] = formatValue(dayValue(day, metric), metric)
+          byDay.set(day.day, row)
+        }
+      })
+      return [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1)).map(([day, row]) => [periodLabel(day), ...row])
     },
   }
 }

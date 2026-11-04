@@ -9,17 +9,30 @@ const signed = new Intl.NumberFormat(locale, {
   signDisplay: 'exceptZero',
 })
 
-export const unit: Record<Metric, string> = { temperature: '°C', humidity: '%' }
+export const unit: Record<Metric, string> = { temperature: '°C', humidity: '%', absolute: 'g/m³' }
 
 export function formatValue(value: number | null | undefined, metric: Metric): string {
   if (value === null || value === undefined) return '–'
-  const number = metric === 'temperature' ? oneDecimal.format(value) : noDecimal.format(value)
-  return metric === 'temperature' ? `${number} °C` : `${number} %`
+  const number = metric === 'humidity' ? noDecimal.format(value) : oneDecimal.format(value)
+  return `${number} ${unit[metric]}`
 }
 
 export function formatDelta(value: number | null | undefined, metric: Metric): string {
   if (value === null || value === undefined) return '–'
-  return `${signed.format(value)} ${metric === 'temperature' ? 'K' : t('deltaUnitHumidity')}`
+  const suffix = metric === 'temperature' ? 'K' : metric === 'absolute' ? 'g/m³' : t('deltaUnitHumidity')
+  return `${signed.format(value)} ${suffix}`
+}
+
+/** A plain number with up to one decimal, e.g. "12,4". */
+export const formatNumber = (value: number, digits = 1) =>
+  new Intl.NumberFormat(locale, { maximumFractionDigits: digits }).format(value)
+
+/** Minutes as "35 Min." or "1 Std. 5 Min.". */
+export function formatMinutes(minutes: number): string {
+  if (minutes < 60) return t('minutes', { n: Math.round(minutes) })
+  const hours = Math.floor(minutes / 60)
+  const rest = Math.round(minutes - hours * 60)
+  return rest ? t('hoursMinutes', { h: hours, m: rest }) : t('hours', { n: hours })
 }
 
 /** A temperature difference without sign, e.g. "1,5 °C". */

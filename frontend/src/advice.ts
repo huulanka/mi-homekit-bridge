@@ -1,5 +1,5 @@
 // Pure rules behind the room-card hints (unit-tested in advice.test.ts).
-import type { HumidShare, OverviewSensor, Status } from './api'
+import type { Air, MouldShare, OverviewSensor, Status } from './api'
 
 /** Within this many kelvin of the target counts as "on target". */
 export const TARGET_TOLERANCE = 0.5
@@ -71,12 +71,21 @@ export function targetAdvice(
 
 export type Severity = 'good' | 'warning' | 'critical'
 
-/** Share of time above 60 % relative humidity: rarely is fine, more than half the
- * time means the room stays damp (mould risk). */
-export function humidSeverity(humid: HumidShare): Severity {
-  if (humid.share <= 0.1) return 'good'
-  if (humid.share <= 0.5) return 'warning'
+const RANK: Record<Severity, number> = { good: 0, warning: 1, critical: 2 }
+
+/** Severity of the last 7 days: mould needs damp walls for hours every day, so
+ * more than a quarter of the time (6 h a day) above the limit is critical. */
+export function mouldWeekSeverity(mould: MouldShare): Severity {
+  if (mould.share <= 0.05) return 'good'
+  if (mould.share <= 0.25) return 'warning'
   return 'critical'
+}
+
+/** The worse of "right now" and "the last 7 days", or null without data. */
+export function mouldSeverity(air: Air | null, mould: MouldShare | null): Severity | null {
+  const levels = [air?.level ?? null, mould ? mouldWeekSeverity(mould) : null].filter((l): l is Severity => l !== null)
+  if (levels.length === 0) return null
+  return levels.reduce((worst, level) => (RANK[level] > RANK[worst] ? level : worst))
 }
 
 /** Signal strength in bars (1-4). Below about -90 dBm reception gets unreliable. */
@@ -97,13 +106,16 @@ export function freshOutdoorTemperature(outdoor: OverviewSensor | undefined, now
 }
 
 export interface Banner {
-  kind: 'offline' | 'bluetooth' | 'homekit'
+  kind: 'offline' | 'bluetooth' | 'homekit' | 'power'
   severity: 'warning' | 'critical'
   since: number | null
 }
 
+/** Under-voltage is reported for a day after it happened. */
+export const POWER_BANNER_SECONDS = 24 * 3600
+
 /** Banners for the top of the page, most severe first. */
-export function banners(status: Status | undefined, offlineSince: number | null): Banner[] {
+export function banners(status: Status | undefined, offlineSince: number | null, now = 0): Banner[] {
   const result: Banner[] = []
   if (offlineSince !== null) result.push({ kind: 'offline', severity: 'critical', since: offlineSince })
   if (status && offlineSince === null) {
@@ -112,6 +124,10 @@ export function banners(status: Status | undefined, offlineSince: number | null)
       result.push({ kind: 'bluetooth', severity: state === 'failed' ? 'critical' : 'warning', since: status.bluetooth.since })
     }
     if (!status.homekit.paired) result.push({ kind: 'homekit', severity: 'warning', since: null })
+    const power = status.system?.last_undervoltage ?? null
+    if (power !== null && now - power < POWER_BANNER_SECONDS) {
+      result.push({ kind: 'power', severity: 'warning', since: power })
+    }
   }
   return result
 }

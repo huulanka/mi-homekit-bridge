@@ -22,7 +22,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-SCHEMA_VERSION = 2
+from .climate import absolute_humidity
+
+SCHEMA_VERSION = 3
 
 _EVENTS_SCHEMA = """
 CREATE TABLE events (
@@ -42,15 +44,19 @@ CREATE TABLE sensors (
     id   TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('ble', 'weather')),
-    target_temperature REAL
+    target_temperature REAL,
+    surface_factor REAL
 ) STRICT;
 
 CREATE TABLE readings (
-    sensor_id   TEXT    NOT NULL REFERENCES sensors (id),
-    ts          INTEGER NOT NULL,
-    temperature REAL,
-    humidity    REAL,
-    battery     INTEGER,
+    sensor_id     TEXT    NOT NULL REFERENCES sensors (id),
+    ts            INTEGER NOT NULL,
+    temperature   REAL,
+    humidity      REAL,
+    battery       INTEGER,
+    radiation     REAL,
+    wind          REAL,
+    precipitation REAL,
     PRIMARY KEY (sensor_id, ts)
 ) STRICT, WITHOUT ROWID;
 """
@@ -58,7 +64,15 @@ CREATE TABLE readings (
 )
 
 # Each entry upgrades the schema from version ``index + 1`` to ``index + 2``.
-_MIGRATIONS = ("ALTER TABLE sensors ADD COLUMN target_temperature REAL;" + _EVENTS_SCHEMA,)
+_MIGRATIONS = (
+    "ALTER TABLE sensors ADD COLUMN target_temperature REAL;" + _EVENTS_SCHEMA,
+    """
+    ALTER TABLE sensors ADD COLUMN surface_factor REAL;
+    ALTER TABLE readings ADD COLUMN radiation REAL;
+    ALTER TABLE readings ADD COLUMN wind REAL;
+    ALTER TABLE readings ADD COLUMN precipitation REAL;
+    """,
+)
 
 SensorKind = Literal["ble", "weather"]
 
@@ -69,6 +83,8 @@ class SensorInfo:
     name: str
     kind: SensorKind
     target_temperature: float | None = None
+    surface_factor: float | None = None
+    """Temperature factor fRsi of the coldest wall spots (see :mod:`.climate`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +94,16 @@ class Sample:
     temperature: float | None = None
     humidity: float | None = None
     battery: int | None = None
+    radiation: float | None = None
+    """Outdoor only: global solar radiation in W/m²."""
+    wind: float | None = None
+    """Outdoor only: wind speed in km/h."""
+    precipitation: float | None = None
+    """Outdoor only: precipitation rate in mm/h."""
+
+
+Row = tuple[int, float | None, float | None, float | None, float | None, float | None]
+"""A raw reading: ``(ts, temperature, humidity, radiation, wind, precipitation)``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +118,14 @@ class Bucket:
     humidity_min: float | None
     humidity_avg: float | None
     humidity_max: float | None
+    absolute_min: float | None = None
+    absolute_avg: float | None = None
+    absolute_max: float | None = None
+    """Absolute humidity in g/m³, computed per sample."""
+    radiation_avg: float | None = None
+    wind_avg: float | None = None
+    precipitation_avg: float | None = None
+    """Mean precipitation rate (mm/h); times the bucket length gives the amount."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +135,7 @@ class HourlyProfilePoint:
     temperature_avg: float | None
     humidity_avg: float | None
     samples: int
+    absolute_avg: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +145,7 @@ class HeatmapCell:
     hour: int
     temperature_avg: float | None
     humidity_avg: float | None
+    absolute_avg: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,16 +160,6 @@ class Event:
     kind: str
     sensor_id: str | None = None
     data: Mapping[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class HumidityShare:
-    """How often the humidity was above a threshold."""
-
-    share: float | None
-    """Fraction of samples above the threshold, 0-1; ``None`` without samples."""
-    hours: int
-    """Number of distinct hours with samples."""
 
 
 DAY: Literal["day"] = "day"
@@ -151,6 +177,7 @@ class HistoryStore:
         self._conn.execute("PRAGMA synchronous = NORMAL")
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA busy_timeout = 5000")
+        self._conn.create_function("abs_humidity", 2, absolute_humidity, deterministic=True)
         self._migrate()
 
     def close(self) -> None:
@@ -181,21 +208,36 @@ class HistoryStore:
         """Register sensors; names and targets follow the current configuration."""
         with self._lock:
             self._conn.executemany(
-                "INSERT INTO sensors (id, name, kind, target_temperature) VALUES (?, ?, ?, ?) "
+                "INSERT INTO sensors (id, name, kind, target_temperature, surface_factor) "
+                "VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT (id) DO UPDATE SET name = excluded.name, kind = excluded.kind, "
-                "target_temperature = excluded.target_temperature",
-                [(s.id, s.name, s.kind, s.target_temperature) for s in sensors],
+                "target_temperature = excluded.target_temperature, "
+                "surface_factor = excluded.surface_factor",
+                [(s.id, s.name, s.kind, s.target_temperature, s.surface_factor) for s in sensors],
             )
 
     def add_samples(self, samples: Iterable[Sample]) -> int:
         """Store samples. A second sample for the same sensor and second is ignored."""
-        rows = [(s.sensor_id, s.ts, s.temperature, s.humidity, s.battery) for s in samples]
+        rows = [
+            (
+                s.sensor_id,
+                s.ts,
+                s.temperature,
+                s.humidity,
+                s.battery,
+                s.radiation,
+                s.wind,
+                s.precipitation,
+            )
+            for s in samples
+        ]
         with self._lock:
             before = self._conn.total_changes
             self._conn.execute("BEGIN")
             self._conn.executemany(
-                "INSERT INTO readings (sensor_id, ts, temperature, humidity, battery) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT (sensor_id, ts) DO NOTHING",
+                "INSERT INTO readings (sensor_id, ts, temperature, humidity, battery, "
+                "radiation, wind, precipitation) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (sensor_id, ts) DO NOTHING",
                 rows,
             )
             self._conn.execute("COMMIT")
@@ -225,22 +267,21 @@ class HistoryStore:
             ).fetchall()
         return [Event(r[0], r[1], r[2], json.loads(r[3])) for r in rows]
 
-    def humidity_share(
-        self, sensor_id: str, start: int, end: int, threshold: float
-    ) -> HumidityShare:
-        """Share of samples in ``[start, end)`` with a humidity above ``threshold``."""
+    def events_between(self, start: int, end: int) -> list[Event]:
+        """Events in ``[start, end)``, oldest first."""
         with self._lock:
-            share, hours = self._conn.execute(
-                "SELECT avg(humidity > ?), count(DISTINCT ts / 3600) FROM readings "
-                "WHERE sensor_id = ? AND ts >= ? AND ts < ? AND humidity IS NOT NULL",
-                (threshold, sensor_id, start, end),
-            ).fetchone()
-        return HumidityShare(share=share, hours=hours)
+            rows = self._conn.execute(
+                "SELECT ts, kind, sensor_id, data FROM events WHERE ts >= ? AND ts < ? "
+                "ORDER BY ts, id",
+                (start, end),
+            ).fetchall()
+        return [Event(r[0], r[1], r[2], json.loads(r[3])) for r in rows]
 
     def sensors(self) -> list[SensorInfo]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, name, kind, target_temperature FROM sensors ORDER BY kind, name"
+                "SELECT id, name, kind, target_temperature, surface_factor FROM sensors "
+                "ORDER BY kind, name"
             ).fetchall()
         return [SensorInfo(*row) for row in rows]
 
@@ -257,6 +298,45 @@ class HistoryStore:
         if row is None:
             return None
         return Sample(sensor_id, row[0], row[1], row[2], row[3])
+
+    def latest_full(self, sensor_id: str) -> Sample | None:
+        """The most recent sample with all columns (for the outdoor values)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT ts, temperature, humidity, battery, radiation, wind, precipitation "
+                "FROM readings WHERE sensor_id = ? ORDER BY ts DESC LIMIT 1",
+                (sensor_id,),
+            ).fetchone()
+        return None if row is None else Sample(sensor_id, *row)
+
+    def last_battery(self, sensor_id: str) -> tuple[int, int] | None:
+        """``(ts, level)`` of the most recent battery reading."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT ts, battery FROM readings WHERE sensor_id = ? AND battery IS NOT NULL "
+                "ORDER BY ts DESC LIMIT 1",
+                (sensor_id,),
+            ).fetchone()
+        return None if row is None else (int(row[0]), int(row[1]))
+
+    def rows(self, sensor_id: str, start: int, end: int) -> list[Row]:
+        """Raw readings in ``[start, end)``, oldest first."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT ts, temperature, humidity, radiation, wind, precipitation "
+                "FROM readings WHERE sensor_id = ? AND ts >= ? AND ts < ? ORDER BY ts",
+                (sensor_id, start, end),
+            ).fetchall()
+
+    def recorded_timestamps(self, kind: SensorKind, start: int, end: int) -> list[int]:
+        """Distinct timestamps with a reading of any sensor of ``kind``, ascending."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT r.ts FROM readings r JOIN sensors s ON s.id = r.sensor_id "
+                "WHERE s.kind = ? AND r.ts >= ? AND r.ts < ? ORDER BY r.ts",
+                (kind, start, end),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
 
     def first_timestamp(self) -> int | None:
         with self._lock:
@@ -278,9 +358,15 @@ class HistoryStore:
         query = f"""
             SELECT {start_of} AS bucket_start,
                    min(temperature), avg(temperature), max(temperature),
-                   min(humidity), avg(humidity), max(humidity)
-            FROM readings
-            WHERE sensor_id = ? AND ts >= ? AND ts < ?
+                   min(humidity), avg(humidity), max(humidity),
+                   min(ah), avg(ah), max(ah),
+                   avg(radiation), avg(wind), avg(precipitation)
+            FROM (
+                SELECT ts, temperature, humidity, radiation, wind, precipitation,
+                       abs_humidity(temperature, humidity) AS ah
+                FROM readings
+                WHERE sensor_id = ? AND ts >= ? AND ts < ?
+            )
             GROUP BY {key}
             ORDER BY bucket_start
         """  # noqa: S608 - only integers and fixed SQL fragments are interpolated
@@ -294,7 +380,8 @@ class HistoryStore:
             rows = self._conn.execute(
                 """
                 SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS hour,
-                       avg(temperature), avg(humidity), count(*)
+                       avg(temperature), avg(humidity), count(*),
+                       avg(abs_humidity(temperature, humidity))
                 FROM readings
                 WHERE sensor_id = ? AND ts >= ? AND ts < ?
                 GROUP BY hour ORDER BY hour
@@ -310,7 +397,7 @@ class HistoryStore:
                 """
                 SELECT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime') AS day,
                        CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS hour,
-                       avg(temperature), avg(humidity)
+                       avg(temperature), avg(humidity), avg(abs_humidity(temperature, humidity))
                 FROM readings
                 WHERE sensor_id = ? AND ts >= ? AND ts < ?
                 GROUP BY day, hour ORDER BY day, hour
@@ -319,11 +406,13 @@ class HistoryStore:
             ).fetchall()
         return [HeatmapCell(*row) for row in rows]
 
-    def export_rows(self) -> Iterator[tuple[str, int, float | None, float | None, int | None]]:
-        """All samples as ``(sensor name, ts, temperature, humidity, battery)``, oldest first."""
+    def export_rows(self) -> Iterator[tuple[Any, ...]]:
+        """All samples as ``(sensor name, ts, temperature, humidity, battery, radiation,
+        wind, precipitation)``, oldest first."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT s.name, r.ts, r.temperature, r.humidity, r.battery "
+                "SELECT s.name, r.ts, r.temperature, r.humidity, r.battery, "
+                "r.radiation, r.wind, r.precipitation "
                 "FROM readings r JOIN sensors s ON s.id = r.sensor_id "
                 "ORDER BY r.ts, s.name"
             ).fetchall()

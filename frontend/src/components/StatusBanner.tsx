@@ -8,6 +8,7 @@ function message(banner: Banner, now: number): string {
   const time = banner.since === null ? '' : now - banner.since < 20 * 3600 ? formatTime(banner.since) : formatDateTime(banner.since)
   if (banner.kind === 'offline') return t('offline', { time })
   if (banner.kind === 'homekit') return t('homekitUnpaired')
+  if (banner.kind === 'power') return t('power', { time })
   return t(banner.severity === 'critical' ? 'bluetooth_failed' : 'bluetooth_recovering', { time })
 }
 

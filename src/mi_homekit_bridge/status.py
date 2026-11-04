@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .system import SystemHealth
+
 
 @dataclass(frozen=True, slots=True)
 class SensorStatus:
@@ -32,6 +34,8 @@ class BridgeStatus:
     homekit_paired: bool
     homekit_controllers: int
     sensors: tuple[SensorStatus, ...]
+    system: SystemHealth | None = None
+    """Power supply and CPU temperature of the host, if known."""
 
     @property
     def problems(self) -> list[str]:
@@ -64,5 +68,6 @@ class BridgeStatus:
                 }
                 for s in self.sensors
             ],
+            "system": None if self.system is None else self.system.to_json(),
             "problems": self.problems,
         }

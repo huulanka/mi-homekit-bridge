@@ -15,6 +15,9 @@ port = 51826
 # address = "192.168.1.10"
 # Mark a sensor as faulty in HomeKit if it has not reported for this long.
 stale_after_minutes = 60
+# Show the mould risk at the coldest wall spots as HomeKit air quality. Needs
+# [weather] for the outdoor temperature.
+air_quality = true
 
 # One block per thermometer. Find the MAC addresses with `mi-homekit-bridge scan`.
 [[sensors]]
@@ -23,6 +26,10 @@ mac = "A4:C1:38:00:00:01"
 # Optional: desired room temperature in °C (5-30). The dashboard shows whether the
 # room is too warm or too cold and which way to turn the radiator thermostat.
 target_temperature = 21.0
+# Optional: temperature factor fRsi (DIN 4108-2) of the coldest wall spots, for the
+# mould estimate (0.5-0.95). 0.7 is the standard's minimum and the default; well
+# insulated new buildings reach about 0.8, uninsulated old ones 0.6 or less.
+surface_factor = 0.8
 
 [[sensors]]
 name = "Bedroom"
@@ -43,8 +50,8 @@ enabled = true
 # One sample per sensor every N minutes (1-60).
 interval_minutes = 5
 
-# Outdoor temperature and humidity from a weather service, recorded next to your
-# sensors. Requires [history]. No API key needed.
+# Outdoor temperature, humidity, sun, wind and precipitation from a weather service,
+# recorded next to your sensors. Requires [history]. No API key needed.
 [weather]
 enabled = false
 provider = "open-meteo"

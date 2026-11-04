@@ -139,8 +139,8 @@ def test_export_rows_and_first_timestamp(store: HistoryStore) -> None:
     store.add_samples([Sample("W", 200, 5.0, 80.0), Sample("A", 100, 21.0, 50.0, 90)])
     assert store.first_timestamp() == 100
     assert list(store.export_rows()) == [
-        ("Living Room", 100, 21.0, 50.0, 90),
-        ("Outdoor", 200, 5.0, 80.0, None),
+        ("Living Room", 100, 21.0, 50.0, 90, None, None, None),
+        ("Outdoor", 200, 5.0, 80.0, None, None, None, None),
     ]
 
 
@@ -168,7 +168,7 @@ def test_version_1_database_is_migrated(tmp_path: Path) -> None:
     assert store.events() == [Event(200, "started", None, {"version": "x"})]
     store.close()
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
 
 
 def test_events_newest_first_and_pruned(store: HistoryStore) -> None:
@@ -181,12 +181,49 @@ def test_events_newest_first_and_pruned(store: HistoryStore) -> None:
     assert [e.kind for e in store.events()] == ["started", "sensor_back"]
 
 
-def test_humidity_share(store: HistoryStore) -> None:
+def test_raw_rows_battery_and_weather_columns(store: HistoryStore) -> None:
     store.add_samples(
-        [Sample("A", i * 300, 21.0, 65.0 if i < 3 else 55.0) for i in range(12)]
-        + [Sample("A", 7200, 21.0, None)]
+        [
+            Sample("A", 100, 21.0, 50.0, 90),
+            Sample("A", 400, 21.5, 51.0),
+            Sample("W", 300, 5.0, 80.0, radiation=120.0, wind=14.0, precipitation=0.4),
+        ]
     )
-    share = store.humidity_share("A", 0, 7201, threshold=60.0)
-    assert share.share == pytest.approx(0.25)
-    assert share.hours == 1  # samples without humidity do not count
-    assert store.humidity_share("W", 0, 7201, 60.0).share is None
+    assert store.rows("A", 0, 1000) == [
+        (100, 21.0, 50.0, None, None, None),
+        (400, 21.5, 51.0, None, None, None),
+    ]
+    assert store.last_battery("A") == (100, 90)
+    assert store.last_battery("W") is None
+    assert store.latest_full("W") == Sample("W", 300, 5.0, 80.0, None, 120.0, 14.0, 0.4)
+    assert store.recorded_timestamps("ble", 0, 1000) == [100, 400]
+    [bucket] = store.series("W", 0, 1000, 3600)
+    assert (bucket.radiation_avg, bucket.wind_avg, bucket.precipitation_avg) == (120.0, 14.0, 0.4)
+    [indoor] = store.series("A", 0, 1000, 3600)
+    assert indoor.absolute_avg == pytest.approx((9.15 + 9.56) / 2, abs=0.05)
+    assert store.hourly_profile("A", 0, 1000)[0].absolute_avg == indoor.absolute_avg
+
+
+def test_events_between(store: HistoryStore) -> None:
+    for ts in (100, 200, 300):
+        store.add_event(Event(ts, "started"))
+    assert [e.ts for e in store.events_between(150, 300)] == [200]
+
+
+def test_version_2_database_gets_weather_columns(tmp_path: Path) -> None:
+    path = tmp_path / "v2.db"
+    HistoryStore(path).close()
+    with sqlite3.connect(path) as conn:  # turn it back into a version 2 file
+        conn.executescript(
+            """
+            ALTER TABLE sensors DROP COLUMN surface_factor;
+            ALTER TABLE readings DROP COLUMN radiation;
+            ALTER TABLE readings DROP COLUMN wind;
+            ALTER TABLE readings DROP COLUMN precipitation;
+            PRAGMA user_version = 2;
+            """
+        )
+    store = HistoryStore(path)
+    store.upsert_sensors([SensorInfo("A", "Living Room", "ble", 20.0, 0.8)])
+    assert store.sensors()[0].surface_factor == 0.8
+    store.close()

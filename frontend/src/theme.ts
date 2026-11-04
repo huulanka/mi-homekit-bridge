@@ -15,6 +15,12 @@ export interface Theme {
   /** Sequential ramps, low value first (on dark the low end recedes into the surface). */
   temperatureRamp: readonly string[]
   humidityRamp: readonly string[]
+  /** Diverging poles with a neutral gray midpoint: too cold, on target, too warm. */
+  cold: string
+  neutral: string
+  warm: string
+  /** Background of periods without data. */
+  gap: string
 }
 
 const BLUE = ['#cde2fb', '#9ec5f4', '#6da7ec', '#3987e5', '#256abf', '#184f95', '#0d366b']
@@ -31,6 +37,10 @@ const LIGHT: Theme = {
   series: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'],
   temperatureRamp: ORANGE,
   humidityRamp: BLUE,
+  cold: '#3987e5',
+  neutral: '#c3c2b7',
+  warm: '#e34948',
+  gap: 'rgba(11, 11, 11, 0.05)',
 }
 
 const DARK: Theme = {
@@ -44,6 +54,10 @@ const DARK: Theme = {
   series: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'],
   temperatureRamp: [...ORANGE].reverse(),
   humidityRamp: [...BLUE].reverse(),
+  cold: '#5598e7',
+  neutral: '#52514e',
+  warm: '#e66767',
+  gap: 'rgba(255, 255, 255, 0.06)',
 }
 
 const query = '(prefers-color-scheme: dark)'

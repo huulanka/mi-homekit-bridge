@@ -35,7 +35,7 @@ export function baseOption(theme: Theme): ChartOption {
 }
 
 export function valueAxis(theme: Theme, metric: Metric | 'delta') {
-  const suffix = metric === 'temperature' ? ' °C' : metric === 'humidity' ? ' %' : ''
+  const suffix = metric === 'temperature' ? ' °C' : metric === 'humidity' ? ' %' : metric === 'absolute' ? ' g/m³' : ''
   return {
     type: 'value' as const,
     scale: true,
