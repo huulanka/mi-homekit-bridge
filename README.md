@@ -38,6 +38,12 @@ and [HAP-python](https://github.com/ikalchev/HAP-python) (HomeKit).
 Other Xiaomi MiBeacon thermometers supported by `xiaomi-ble` will most likely work too,
 but are untested.
 
+Recent stock firmware of the LYWSD03MMC does not broadcast its battery level, only
+temperature and humidity. The bridge then shows no battery in the Home app (instead
+of a wrong 0 %). The pvvx firmware broadcasts it. After flashing a sensor to pvvx
+with unencrypted BTHome, remove its old bindkey from `bindkeys.env`: with a key
+configured, unencrypted data is ignored (downgrade protection), and the log says so.
+
 ## Requirements
 
 - Linux with BlueZ (tested on a Raspberry Pi 3 Model B with Debian 13)
@@ -127,7 +133,17 @@ setup code manually. The setup code is also stored in
 An optional, read-only web dashboard built into the bridge (no extra service):
 
 - **Overview**: one card per room with temperature, humidity, dew point, battery,
-  today's range, the difference to outdoor and the last 24 hours.
+  signal strength, today's range, the difference to outdoor and the last 24 hours.
+- **Target temperature** (optional, per room): whether the room is too warm or too
+  cold on average over the last 24 hours, and how far to turn a radiator thermostat
+  dial (rule of thumb: dial 1 is about 12 °C, each number adds about 4 °C). No advice
+  outside the heating season (above 15 °C outdoors).
+- **Humidity check**: how much of the last 7 days the humidity was above 60 %. Rarely
+  is fine; more than half of the time means the room stays damp (mould risk).
+- **Live status**: a banner when Bluetooth fails, the bridge is not paired with Apple
+  Home, or the dashboard has lost its connection (then it says how old the data is).
+- **Events**: sensor outages, Bluetooth recoveries and controller resets, kept in the
+  database so they survive reboots.
 - **History**: all sensors in one chart for 24 hours up to everything recorded.
   Longer ranges show averages with a min–max band.
 - **Indoor minus outdoor**: how much warmer (or more humid) it is inside.
@@ -182,7 +198,9 @@ uv run mi-homekit-bridge demo      # http://127.0.0.1:8080 with 400 days of samp
 | `GET /api/profile?days=7\|30\|90\|365` | average per hour of day |
 | `GET /api/heatmap?days=14\|30\|90` | average per day and hour |
 | `GET /api/export.csv` | all samples |
-| `GET /api/health` | status and version |
+| `GET /api/status` | live state: Bluetooth, HomeKit pairing, last reading and signal per sensor |
+| `GET /api/events` | the latest 50 events (outages, recoveries, resets) |
+| `GET /api/health` | `200` if everything works, `503` with a list of `problems` otherwise (for monitoring) |
 
 </details>
 
@@ -214,6 +232,11 @@ stale_after_minutes = 60     # flag a sensor as faulty after this long without d
 [[sensors]]
 name = "Living Room"
 mac = "A4:C1:38:00:00:01"
+target_temperature = 21.0    # optional, °C, shown in the dashboard
+
+[bluetooth]                  # optional
+adapter = "hci0"
+scanning_mode = "active"     # or "passive": only listen (BlueZ 5.56+)
 
 [history]                    # optional, enabled by default
 enabled = true
@@ -270,13 +293,42 @@ ODbL); with `latitude`/`longitude` no lookup happens at all. Weather data by
 | `mi-homekit-bridge fetch-keys [--env-file PATH] [--server REGION]` | fetch bindkeys from the Xiaomi cloud |
 | `mi-homekit-bridge set-key MAC [--env-file PATH]` | store a bindkey you got elsewhere (hidden prompt) |
 | `mi-homekit-bridge demo [--port 8080] [--days 400]` | serve the dashboard with generated sample data |
+| `mi-homekit-bridge reset-bluetooth [--adapter hci0]` | reset a stuck Bluetooth controller (root; the systemd unit runs it automatically) |
 
 Add `-v` for debug logging.
+
+## Bluetooth recovery
+
+Bluetooth controllers can get stuck, the built-in one of the Raspberry Pi 3 in
+particular. The bridge handles this on its own
+([ADR 5](docs/adr/0005-bluetooth-recovery.md)):
+
+1. If nothing at all is received for 5 minutes, it restarts the scan.
+2. If the scan cannot be started, it retries with increasing delays. HomeKit and the
+   dashboard keep running, the sensors are flagged as faulty in the Home app.
+3. If that does not help, it exits with status 75 and the systemd unit resets the
+   controller as root by re-binding its kernel driver. At most once per 30 minutes.
+
+Everything shows up in the dashboard's event list and in
+`journalctl -u mi-homekit-bridge`. `systemctl status mi-homekit-bridge` shows a
+one-line summary such as `Bluetooth running, 2/2 sensors reporting`.
+
+On a Raspberry Pi 3, these make the controller more reliable:
+
+- `scanning_mode = "passive"` in `[bluetooth]`: less traffic between the Pi and the
+  Bluetooth chip.
+- If the Pi is connected by cable, switch off the Wi-Fi part of the shared
+  Wi-Fi/Bluetooth chip: `dtoverlay=disable-wifi` in `/boot/firmware/config.txt`.
+- A proper power supply (5.1 V, 2.5 A). `vcgencmd get_throttled` other than
+  `throttled=0x0` means under-voltage has occurred since boot.
 
 ## Troubleshooting
 
 - **Sensor shows a warning in the Home app**: it has not reported for
-  `stale_after_minutes`. Check the range with `scan` (below about -90 dBm gets unreliable).
+  `stale_after_minutes`, or Bluetooth is down (see the dashboard). Check the range
+  with `scan` (below about -90 dBm gets unreliable).
+- **"sends unencrypted BTHome data but a bindkey is configured"**: the sensor was
+  flashed to custom firmware; remove its line from `bindkeys.env`.
 - **"sends encrypted data but no bindkey is configured"**: run `fetch-keys` or `set-key`.
 - **"Xiaomi rejected the login"** although the password is right: see
   [Accounts without a password](#accounts-without-a-password-sign-in-with-applegoogle-or-captcha-prompts).

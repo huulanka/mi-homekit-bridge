@@ -208,3 +208,42 @@ def test_web_defaults_and_options() -> None:
 def test_invalid_web(data: dict[str, Any], message: str) -> None:
     with pytest.raises(ConfigError, match=message):
         parse_config({"sensors": [_sensor()]} | data, environ={})
+
+
+def test_bluetooth_defaults_and_options() -> None:
+    default = parse_config({"sensors": [_sensor()]}, environ={}).bluetooth
+    assert (default.adapter, default.scanning_mode) == ("hci0", "active")
+    bluetooth = parse_config(
+        {"sensors": [_sensor()], "bluetooth": {"adapter": "hci1", "scanning_mode": "passive"}},
+        environ={},
+    ).bluetooth
+    assert (bluetooth.adapter, bluetooth.scanning_mode) == ("hci1", "passive")
+
+
+@pytest.mark.parametrize(
+    ("bluetooth", "message"),
+    [
+        ({"scanning_mode": "loud"}, "one of: active, passive"),
+        ({"adapter": "/dev/hci0"}, "adapter name"),
+        ({"adapter": "hci0; reboot"}, "adapter name"),
+        ({"interval": 5}, "unknown option"),
+    ],
+)
+def test_invalid_bluetooth(bluetooth: dict[str, Any], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config({"sensors": [_sensor()], "bluetooth": bluetooth}, environ={})
+
+
+def test_target_temperature() -> None:
+    config = parse_config(
+        {"sensors": [_sensor(target_temperature=18), _sensor(name="B", mac="a4c138000002")]},
+        environ={},
+    )
+    assert config.sensors[0].target_temperature == 18.0
+    assert config.sensors[1].target_temperature is None
+
+
+@pytest.mark.parametrize("target", [4.9, 30.5, "18", True])
+def test_invalid_target_temperature(target: object) -> None:
+    with pytest.raises(ConfigError, match="target_temperature"):
+        parse_config({"sensors": [_sensor(target_temperature=target)]}, environ={})

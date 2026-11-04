@@ -20,10 +20,22 @@ stale_after_minutes = 60
 [[sensors]]
 name = "Living Room"
 mac = "A4:C1:38:00:00:01"
+# Optional: desired room temperature in °C (5-30). The dashboard shows how far the
+# room is off and how to turn a radiator thermostat dial (1-5).
+target_temperature = 21.0
 
 [[sensors]]
 name = "Bedroom"
 mac = "A4:C1:38:00:00:02"
+target_temperature = 18.0
+
+[bluetooth]
+# BlueZ adapter. If the controller gets stuck, the systemd unit resets this one.
+adapter = "hci0"
+# "active" asks devices for scan responses, "passive" only listens. Passive causes
+# less radio and UART traffic (recommended on a Raspberry Pi 3), but needs BlueZ
+# 5.56+ with advertisement monitor support.
+scanning_mode = "active"
 
 # Measurement history in a local SQLite database (<state dir>/history.db).
 [history]

@@ -1,13 +1,18 @@
-import type { OverviewSensor } from '../api'
-import { formatAgo, formatDelta, formatValue } from '../format'
+import type { OverviewSensor, SensorLive } from '../api'
+import { HEATING_LIMIT, freshOutdoorTemperature, humidSeverity, signalBars, targetAdvice } from '../advice'
+import { formatAgo, formatDelta, formatFraction, formatKelvin, formatPercent, formatSteps, formatValue } from '../format'
 import { t } from '../i18n'
 import type { Theme } from '../theme'
-import { BatteryIcon, CloudIcon, DropIcon, HomeIcon, WarningIcon } from './Icons'
+import { BatteryIcon, CloudIcon, DropIcon, HomeIcon, SignalIcon, WarningIcon } from './Icons'
+import { severityFill } from '../severity'
+import { SeverityIcon } from './Severity'
 import { Sparkline } from './Sparkline'
 
 interface Props {
   sensor: OverviewSensor
   outdoor: OverviewSensor | undefined
+  /** Live state from /api/status, if available. */
+  live: SensorLive | undefined
   color: string
   theme: Theme
   now: number
@@ -15,10 +20,79 @@ interface Props {
 
 const STALE_SECONDS = { ble: 20 * 60, weather: 75 * 60 }
 
-export function RoomCard({ sensor, outdoor, color, theme, now }: Props) {
+function TargetBlock({ sensor, outdoor, now }: { sensor: OverviewSensor; outdoor: OverviewSensor | undefined; now: number }) {
+  const advice = targetAdvice(sensor, outdoor, now)
+  if (!advice) return null
+  const target = formatValue(advice.target, 'temperature')
+  const basis = advice.average ?? advice.now
+  const verdict =
+    advice.status === 'ok'
+      ? t('onTarget')
+      : advice.status === 'unknown' || basis === null
+        ? null
+        : t(advice.status === 'warm' ? 'tooWarm' : 'tooCold', { value: formatKelvin(basis) })
+  const outside = freshOutdoorTemperature(outdoor, now)
+  const heatingOff = advice.status === 'warm' && advice.steps === null && outside !== null && outside >= HEATING_LIMIT
+
+  return (
+    <div className="grid gap-0.5 border-t border-border pt-3 text-xs text-ink-2">
+      <p className="flex flex-wrap items-baseline gap-x-2">
+        <span className="font-medium text-ink">{t('target', { value: target })}</span>
+        {verdict && <span>{advice.average !== null ? t('avg24h', { value: verdict }) : verdict}</span>}
+      </p>
+      {advice.steps !== null && (
+        <p className="text-ink">
+          {t(advice.steps < 0 ? 'turnDown' : 'turnUp', { steps: formatSteps(advice.steps) })}
+        </p>
+      )}
+      {heatingOff ? (
+        <p className="text-muted">{t('heatingOff', { limit: formatValue(HEATING_LIMIT, 'temperature') })}</p>
+      ) : (
+        advice.status !== 'ok' && (
+          <p className="text-muted">{t('dialHint', { target, dial: formatFraction(advice.dial) })}</p>
+        )
+      )}
+    </div>
+  )
+}
+
+function HumidBlock({ sensor }: { sensor: OverviewSensor }) {
+  const humid = sensor.humid
+  if (!humid) return null
+  const severity = humidSeverity(humid)
+  const basis = humid.hours >= 7 * 24 - 1 ? t('humidBasis') : t('humidBasisShort', { hours: humid.hours })
+  return (
+    <div className="grid gap-1.5 border-t border-border pt-3 text-xs text-ink-2">
+      <p className="flex flex-wrap items-baseline justify-between gap-x-2">
+        <span>
+          {t('humidLabel', { threshold: humid.threshold })}:{' '}
+          <span className="font-medium text-ink">{t('humidShare', { share: formatPercent(humid.share) })}</span>
+        </span>
+        <span className="text-muted">{basis}</span>
+      </p>
+      <div
+        className="h-2 overflow-hidden rounded-full bg-wash"
+        role="meter"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(humid.share * 100)}
+        aria-label={t('humidLabel', { threshold: humid.threshold })}
+      >
+        <div className={`h-full rounded-full ${severityFill[severity]}`} style={{ width: `${Math.max(2, humid.share * 100)}%` }} />
+      </div>
+      <p className="flex items-center gap-1.5 text-ink">
+        <SeverityIcon severity={severity} decorative />
+        {t(`humid_${severity}`)}
+      </p>
+    </div>
+  )
+}
+
+export function RoomCard({ sensor, outdoor, live, color, theme, now }: Props) {
   const latest = sensor.latest
-  const stale = !latest || now - latest.ts > STALE_SECONDS[sensor.kind]
-  const outsideTemperature = outdoor?.latest?.temperature ?? null
+  const lastSeen = live?.last_seen ?? latest?.ts ?? null
+  const stale = live ? !live.reporting : !latest || now - latest.ts > STALE_SECONDS[sensor.kind]
+  const outsideTemperature = freshOutdoorTemperature(outdoor, now)
   const delta =
     sensor.kind === 'ble' && latest?.temperature != null && outsideTemperature !== null
       ? latest.temperature - outsideTemperature
@@ -34,12 +108,20 @@ export function RoomCard({ sensor, outdoor, color, theme, now }: Props) {
           <span className="truncate">{sensor.name}</span>
           <KindIcon className="size-4 shrink-0 text-muted" />
         </h2>
-        {latest?.battery != null && (
-          <span className="flex items-center gap-1 text-xs text-ink-2 tabular" title={t('battery')}>
-            <BatteryIcon level={latest.battery} className="size-5" />
-            {latest.battery} %
-          </span>
-        )}
+        <span className="flex items-center gap-3 text-xs text-ink-2 tabular">
+          {live?.rssi != null && (
+            <span className="flex items-center gap-1" title={t('signal', { rssi: live.rssi })}>
+              <SignalIcon bars={signalBars(live.rssi)} className="size-4" />
+              <span className="sr-only">{t('signal', { rssi: live.rssi })}</span>
+            </span>
+          )}
+          {latest?.battery != null && (
+            <span className="flex items-center gap-1" title={t('battery')}>
+              <BatteryIcon level={latest.battery} className="size-5" />
+              {latest.battery} %
+            </span>
+          )}
+        </span>
       </header>
 
       <div className="flex items-end justify-between gap-3">
@@ -75,18 +157,21 @@ export function RoomCard({ sensor, outdoor, color, theme, now }: Props) {
         )}
       </footer>
 
+      <TargetBlock sensor={sensor} outdoor={outdoor} now={now} />
+      <HumidBlock sensor={sensor} />
+
       {stale ? (
         <p className="flex items-center gap-1.5 text-xs font-medium text-ink">
           <WarningIcon className="size-4 text-warning" />
           {t('stale')}
-          {latest && (
+          {lastSeen !== null && (
             <span className="font-normal text-muted">
-              · {t('lastSeen')} {formatAgo(latest.ts, now)}
+              · {t('lastSeen')} {formatAgo(lastSeen, now)}
             </span>
           )}
         </p>
       ) : (
-        latest && <p className="text-xs text-muted">{formatAgo(latest.ts, now)}</p>
+        lastSeen !== null && <p className="text-xs text-muted">{formatAgo(lastSeen, now)}</p>
       )}
     </article>
   )

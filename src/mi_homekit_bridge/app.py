@@ -6,8 +6,9 @@ import asyncio
 import contextlib
 import logging
 import signal
+import sqlite3
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,19 +16,42 @@ import aiohttp
 from habluetooth import BluetoothServiceInfoBleak
 from pyhap.accessory_driver import AccessoryDriver
 
+from . import __version__
+from .bluetooth import ScanSupervisor
 from .config import BridgeConfig, SensorConfig
 from .decoder import Reading, SensorDecoder
-from .history import HistoryStore, Sample, SensorInfo
+from .history import Event, HistoryStore, Sample, SensorInfo
 from .homekit import ThermometerAccessory, create_bridge, create_driver
 from .scanner import create_scanner
+from .status import BridgeStatus, SensorStatus
+from .systemd import clock_synchronized, notify, watchdog_interval
 from .weather import WeatherError, WeatherProvider, create_provider
 from .web import start_web
 
 _LOGGER = logging.getLogger(__name__)
 
-STALE_CHECK_INTERVAL_SECONDS = 60.0
+MONITOR_INTERVAL_SECONDS = 30.0
 WEATHER_SENSOR_ID = "weather"
 HISTORY_FILENAME = "history.db"
+MIN_FRESH_SECONDS = 300
+"""A value is recorded only if it was received within the last history interval,
+but at least within this many seconds."""
+
+
+class EventLog:
+    """Records events in the history database, if there is one. Never raises."""
+
+    def __init__(self, store: HistoryStore | None, clock: Callable[[], float] = time.time) -> None:
+        self._store = store
+        self._clock = clock
+
+    def __call__(self, kind: str, sensor_id: str | None = None, /, **data: object) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.add_event(Event(int(self._clock()), kind, sensor_id, data))
+        except sqlite3.Error:
+            _LOGGER.exception("Could not record event %s", kind)
 
 
 @dataclass(slots=True)
@@ -38,8 +62,12 @@ class SensorChannel:
     decoder: SensorDecoder
     accessory: ThermometerAccessory
     last_seen: float | None = None
+    """Monotonic time of the last reading."""
+    rssi: int | None = None
     stale: bool = field(default=True)
     """Sensors start as stale ("no data yet") until the first reading arrives."""
+    lost: bool = False
+    """It stopped reporting after it had reported before."""
     temperature: float | None = None
     humidity: float | None = None
     battery: int | None = None
@@ -53,13 +81,34 @@ class SensorChannel:
             self.battery = reading.battery
 
 
+def sensor_infos(config: BridgeConfig) -> list[SensorInfo]:
+    """All sensors to register in the history, including the weather 'sensor'."""
+    infos = [
+        SensorInfo(sensor.mac, sensor.name, "ble", sensor.target_temperature)
+        for sensor in config.sensors
+    ]
+    if config.weather.enabled:
+        infos.append(SensorInfo(WEATHER_SENSOR_ID, config.weather.name, "weather"))
+    return infos
+
+
 class BridgeApp:
     """Routes advertisements to the right accessory and tracks stale sensors."""
 
-    def __init__(self, config: BridgeConfig, driver: AccessoryDriver) -> None:
+    def __init__(
+        self,
+        config: BridgeConfig,
+        driver: AccessoryDriver,
+        *,
+        events: EventLog | None = None,
+        with_battery: frozenset[str] = frozenset(),
+    ) -> None:
         self._config = config
+        self._driver = driver
+        self._events = events if events is not None else EventLog(None)
         self._stale_after = config.stale_after_minutes * 60.0
-        _, accessories = create_bridge(driver, config)
+        self._fresh_for = max(config.history.interval_minutes * 60, MIN_FRESH_SECONDS)
+        _, accessories = create_bridge(driver, config, with_battery)
         self.channels: dict[str, SensorChannel] = {
             sensor.mac: SensorChannel(
                 config=sensor,
@@ -76,39 +125,44 @@ class BridgeApp:
         reading = channel.decoder.decode(info)
         if reading is None:
             return
-        channel.accessory.apply(reading)
+        if channel.accessory.apply(reading):
+            _LOGGER.info("%s reports its battery level, adding it to HomeKit", channel.config.name)
+            self._driver.config_changed()
         channel.remember(reading)
-        channel.last_seen = now
+        previous, channel.last_seen, channel.rssi = channel.last_seen, now, info.rssi
         if channel.stale:
             channel.stale = False
             channel.accessory.set_fault(False)
             _LOGGER.info("%s is reporting (rssi %s dBm)", channel.config.name, info.rssi)
+            if channel.lost and previous is not None:
+                self._events(
+                    "sensor_back", channel.config.mac, minutes=round((now - previous) / 60)
+                )
+            channel.lost = False
         _LOGGER.debug("%s: %s (rssi %s dBm)", channel.config.name, reading, info.rssi)
 
-    def check_stale(self, now: float) -> bool:
-        """Flag sensors without readings for too long. Returns ``True`` if all are stale."""
+    def check_stale(self, now: float) -> None:
+        """Flag sensors without readings for ``stale_after_minutes`` as faulty."""
         for channel in self.channels.values():
             if channel.stale or channel.last_seen is None:
                 continue
             if now - channel.last_seen >= self._stale_after:
+                channel.stale = channel.lost = True
+                channel.accessory.set_fault(True)
+                minutes = round(self._stale_after / 60)
+                _LOGGER.warning("%s has not reported for %d minutes", channel.config.name, minutes)
+                self._events("sensor_lost", channel.config.mac, minutes=minutes)
+
+    def bluetooth_down(self) -> None:
+        """The scan does not work: flag all sensors as faulty right away."""
+        for channel in self.channels.values():
+            if not channel.stale:
                 channel.stale = True
                 channel.accessory.set_fault(True)
-                _LOGGER.warning(
-                    "%s has not reported for %d minutes",
-                    channel.config.name,
-                    self._stale_after // 60,
-                )
-        return all(channel.stale for channel in self.channels.values())
 
     # -- history ---------------------------------------------------------------
 
-    def sensor_infos(self) -> list[SensorInfo]:
-        infos = [SensorInfo(mac, ch.config.name, "ble") for mac, ch in self.channels.items()]
-        if self._config.weather.enabled:
-            infos.append(SensorInfo(WEATHER_SENSOR_ID, self._config.weather.name, "weather"))
-        return infos
-
-    def restore(self, latest: dict[str, Sample]) -> None:
+    def restore(self, latest: Mapping[str, Sample]) -> None:
         """Show the last recorded values after a restart instead of zeros.
 
         Sensors stay flagged as faulty until they report again, and restored values
@@ -122,13 +176,63 @@ class BridgeApp:
             channel.accessory.apply(reading)
             channel.remember(reading)
 
-    def samples(self, ts: int) -> list[Sample]:
-        """Current values of all sensors that are reporting."""
+    def samples(self, ts: int, now: float) -> list[Sample]:
+        """Values of all sensors that delivered a reading recently.
+
+        A sensor that went silent is not recorded with its last value: the history
+        shows a gap instead of a flat line.
+        """
         return [
             Sample(mac, ts, ch.temperature, ch.humidity, ch.battery)
             for mac, ch in self.channels.items()
-            if not ch.stale and (ch.temperature is not None or ch.humidity is not None)
+            if not ch.stale
+            and ch.last_seen is not None
+            and now - ch.last_seen <= self._fresh_for
+            and (ch.temperature is not None or ch.humidity is not None)
         ]
+
+    # -- status ----------------------------------------------------------------
+
+    def status(
+        self, supervisor: ScanSupervisor, *, started: float, now: float, wall: float
+    ) -> BridgeStatus:
+        """Live status. ``started`` and ``now`` are monotonic, ``wall`` is ``time.time()``."""
+
+        def to_wall(moment: float | None) -> int | None:
+            return None if moment is None else round(wall - (now - moment))
+
+        running_long = now - started >= self._stale_after
+        state = self._driver.state
+        return BridgeStatus(
+            version=__version__,
+            started_at=round(wall - (now - started)),
+            bluetooth_state=supervisor.state.value,
+            bluetooth_since=round(wall - (now - supervisor.since)),
+            bluetooth_error=supervisor.last_error,
+            scanning_mode=self._config.bluetooth.scanning_mode,
+            last_advertisement=to_wall(supervisor.last_advertisement),
+            homekit_paired=bool(state.paired),
+            homekit_controllers=len(state.paired_clients),
+            sensors=tuple(
+                SensorStatus(
+                    id=mac,
+                    name=ch.config.name,
+                    reporting=not ch.stale,
+                    problem=ch.stale and (ch.last_seen is not None or running_long),
+                    last_seen=to_wall(ch.last_seen),
+                    rssi=ch.rssi,
+                )
+                for mac, ch in self.channels.items()
+            ),
+        )
+
+    def status_line(self, supervisor: ScanSupervisor) -> str:
+        """Short summary for ``systemctl status``."""
+        reporting = sum(not ch.stale for ch in self.channels.values())
+        return (
+            f"Bluetooth {supervisor.state.value}, "
+            f"{reporting}/{len(self.channels)} sensors reporting"
+        )
 
 
 async def _run_aligned(
@@ -161,11 +265,43 @@ async def _fetch_weather(provider: WeatherProvider, store: HistoryStore) -> None
     _LOGGER.debug("Weather: %s", observation)
 
 
+class Recorder:
+    """Writes the current values into the history every interval."""
+
+    def __init__(
+        self,
+        app: BridgeApp,
+        store: HistoryStore,
+        monotonic: Callable[[], float],
+        clock_ok: Callable[[], bool] = clock_synchronized,
+    ) -> None:
+        self._app = app
+        self._store = store
+        self._monotonic = monotonic
+        self._clock_ok = clock_ok
+        self._waiting_for_clock = False
+
+    async def __call__(self, ts: int) -> None:
+        if not self._clock_ok():
+            if not self._waiting_for_clock:
+                _LOGGER.warning("The system clock is not synchronized yet, not recording")
+                self._waiting_for_clock = True
+            return
+        self._waiting_for_clock = False
+        samples = self._app.samples(ts, self._monotonic())
+        if samples:
+            await asyncio.to_thread(self._store.add_samples, samples)
+
+
 async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
-    """Run until SIGINT/SIGTERM."""
+    """Run until SIGINT/SIGTERM.
+
+    Raises :class:`~mi_homekit_bridge.bluetooth.ControllerResetRequired` if the
+    Bluetooth controller is stuck; the caller exits with the matching status.
+    """
     loop = asyncio.get_running_loop()
+    started = loop.time()
     driver = create_driver(config, state_dir, loop)
-    app = BridgeApp(config, driver)
 
     stop = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -173,71 +309,116 @@ async def run_bridge(config: BridgeConfig, state_dir: Path) -> None:
 
     async with contextlib.AsyncExitStack() as stack:
         store: HistoryStore | None = None
+        latest: dict[str, Sample] = {}
         if config.history.enabled:
             store = HistoryStore(state_dir / HISTORY_FILENAME)
             stack.callback(store.close)
-            await asyncio.to_thread(store.upsert_sensors, app.sensor_infos())
-            latest = {mac: await asyncio.to_thread(store.latest, mac) for mac in app.channels}
-            app.restore({mac: sample for mac, sample in latest.items() if sample})
+            await asyncio.to_thread(store.upsert_sensors, sensor_infos(config))
+            for sensor in config.sensors:
+                sample = await asyncio.to_thread(store.latest, sensor.mac)
+                if sample is not None:
+                    latest[sensor.mac] = sample
+
+        events = EventLog(store)
+        app = BridgeApp(
+            config,
+            driver,
+            events=events,
+            with_battery=frozenset(m for m, s in latest.items() if s.battery is not None),
+        )
+        app.restore(latest)
+
+        def on_advertisement(info: BluetoothServiceInfoBleak) -> None:
+            now = loop.time()
+            supervisor.advertisement_seen(now)
+            app.handle_advertisement(info, now)
+
+        supervisor = ScanSupervisor(
+            lambda: create_scanner(
+                on_advertisement,
+                adapter=config.bluetooth.adapter,
+                scanning_mode=config.bluetooth.scanning_mode,
+            ),
+            state_dir=state_dir,
+            listener=lambda kind, data: events(kind, **data),
+        )
+
+        def status() -> BridgeStatus:
+            return app.status(supervisor, started=started, now=loop.time(), wall=time.time())
+
+        if store is not None:
             _LOGGER.info(
                 "Recording every %d minute(s) to %s",
                 config.history.interval_minutes,
                 store.path,
             )
             if config.web.enabled:
-                runner = await start_web(store, config.web.host, config.web.port)
+                runner = await start_web(store, config.web.host, config.web.port, status=status)
                 stack.push_async_callback(runner.cleanup)
 
-        scanner = create_scanner(lambda info: app.handle_advertisement(info, loop.time()))
         await driver.async_start()
         stack.push_async_callback(driver.async_stop)
-        await scanner.start()
-        stack.push_async_callback(scanner.stop)
-        _LOGGER.info("Bridge '%s' running with %d sensor(s)", config.name, len(app.channels))
+        await supervisor.start(loop.time())
+        stack.push_async_callback(supervisor.stop)
+        events("started", version=__version__)
+        _LOGGER.info(
+            "Bridge '%s' running with %d sensor(s), %s Bluetooth scan on %s",
+            config.name,
+            len(app.channels),
+            config.bluetooth.scanning_mode,
+            config.bluetooth.adapter,
+        )
+        notify("READY=1", f"STATUS={app.status_line(supervisor)}")
 
         background: list[asyncio.Task[None]] = []
         if store is not None:
-            history_store = store
-
-            async def record(ts: int) -> None:
-                samples = app.samples(ts)
-                if samples:
-                    await asyncio.to_thread(history_store.add_samples, samples)
-
+            recorder = Recorder(app, store, loop.time)
             background.append(
                 asyncio.create_task(
-                    _run_aligned(config.history.interval_minutes * 60, stop, record)
+                    _run_aligned(config.history.interval_minutes * 60, stop, recorder)
                 )
             )
-
             if config.weather.enabled:
                 session = await stack.enter_async_context(aiohttp.ClientSession())
                 provider = create_provider(session, config.weather)
+                history_store = store
 
                 async def weather(_ts: int) -> None:
                     await _fetch_weather(provider, history_store)
 
-                await weather(0)
-                background.append(
-                    asyncio.create_task(
-                        _run_aligned(config.weather.interval_minutes * 60, stop, weather)
-                    )
-                )
+                async def weather_loop() -> None:
+                    try:
+                        await weather(0)
+                    except Exception:  # same protection as in _run_aligned
+                        _LOGGER.exception("First weather update failed")
+                    await _run_aligned(config.weather.interval_minutes * 60, stop, weather)
 
-        last_restart = loop.time()
+                background.append(asyncio.create_task(weather_loop()))
+
+        watchdog = watchdog_interval()
+        period = (
+            MONITOR_INTERVAL_SECONDS
+            if watchdog is None
+            else min(MONITOR_INTERVAL_SECONDS, watchdog)
+        )
         try:
             while not stop.is_set():
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=STALE_CHECK_INTERVAL_SECONDS)
+                    await asyncio.wait_for(stop.wait(), timeout=period)
+                if stop.is_set():
+                    break
                 now = loop.time()
-                if app.check_stale(now) and now - last_restart >= config.stale_after_minutes * 60:
-                    # No sensor reported at all: the BlueZ discovery session may have died
-                    # (e.g. bluetoothd restart). Restarting the scan is cheap and harmless.
-                    _LOGGER.warning("No sensor is reporting, restarting Bluetooth scan")
-                    last_restart = now
-                    await scanner.stop()
-                    await scanner.start()
+                app.check_stale(now)
+                await supervisor.check(now)
+                if not supervisor.healthy:
+                    app.bluetooth_down()
+                states = [f"STATUS={app.status_line(supervisor)}"]
+                if watchdog is not None:
+                    states.append("WATCHDOG=1")
+                notify(*states)
+            events("stopped")
         finally:
             _LOGGER.info("Shutting down")
+            notify("STOPPING=1")
             stop.set()
             await asyncio.gather(*background, return_exceptions=True)

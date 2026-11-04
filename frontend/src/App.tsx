@@ -1,13 +1,26 @@
 import { useMemo, useState } from 'react'
-import { pick, type Heatmap, type Metric, type Overview, type Profile, type RangeKey, type Series } from './api'
+import { banners } from './advice'
+import {
+  pick,
+  type Events,
+  type Heatmap,
+  type Metric,
+  type Overview,
+  type Profile,
+  type RangeKey,
+  type Series,
+  type Status,
+} from './api'
 import { DeltaChart } from './charts/DeltaChart'
 import { HeatmapChart } from './charts/HeatmapChart'
 import { HistoryChart } from './charts/HistoryChart'
 import { ProfileChart } from './charts/ProfileChart'
 import { ChartCard } from './components/ChartCard'
 import { FilterBar, RANGES } from './components/FilterBar'
+import { EventsCard } from './components/EventsCard'
 import { DownloadIcon } from './components/Icons'
 import { RoomCard } from './components/RoomCard'
+import { StatusBanners } from './components/StatusBanner'
 import { HOURS, computeDeltas, heatmapCells, profileValues } from './data'
 import { formatDate, formatDateTime, formatDelta, formatTime, formatValue } from './format'
 import { t, type MessageKey } from './i18n'
@@ -38,6 +51,8 @@ export default function App() {
   const series = useApi<Series>(`/api/series?range=${range}`, 300_000)
   const profile = useApi<Profile>(`/api/profile?days=${PROFILE_DAYS[range]}`, 900_000)
   const heatmap = useApi<Heatmap>(`/api/heatmap?days=${HEATMAP_DAYS[range]}`, 900_000)
+  const status = useApi<Status>('/api/status', 30_000)
+  const events = useApi<Events>('/api/events', 120_000)
 
   // A sensor keeps its color slot whatever is filtered: assigned by overview order.
   const colors = useMemo(() => {
@@ -50,6 +65,14 @@ export default function App() {
   const outdoor = sensors.find((s) => s.kind === 'weather')
   const hasData = sensors.some((s) => s.latest)
   const now = overview.data?.generated_at ?? 0
+  // A failed refresh while data is shown means the bridge is unreachable. The
+  // status endpoint does not count: it is missing in demo mode.
+  const offlineSince = overview.error && overview.data ? overview.data.generated_at : null
+  const live = useMemo(() => new Map((status.data?.sensors ?? []).map((s) => [s.id, s])), [status.data])
+  const names = useMemo(
+    () => Object.fromEntries((overview.data?.sensors ?? []).map((s) => [s.id, s.name])),
+    [overview.data],
+  )
 
   return (
     <div className="mx-auto max-w-6xl px-4 pt-[max(1.5rem,env(safe-area-inset-top))] pb-10 sm:px-6">
@@ -61,6 +84,8 @@ export default function App() {
           </p>
         )}
       </header>
+
+      <StatusBanners banners={banners(status.data, offlineSince)} now={now} />
 
       {overview.error && !overview.data && (
         <p className="mt-6 rounded-2xl border border-border bg-surface p-5 text-ink-2">
@@ -80,6 +105,7 @@ export default function App() {
                 key={sensor.id}
                 sensor={sensor}
                 outdoor={outdoor}
+                live={offlineSince === null ? live.get(sensor.id) : undefined}
                 color={colors[sensor.id] ?? theme.series[0]!}
                 theme={theme}
                 now={now}
@@ -149,7 +175,25 @@ export default function App() {
             )}
           </div>
 
-          <footer className="mt-8 flex flex-wrap items-center justify-between gap-3 text-sm text-muted">
+          {events.data && (
+            <div className="mt-4">
+              <EventsCard events={events.data.events} names={names} />
+            </div>
+          )}
+
+          {status.data && (
+            <p className="mt-8 text-xs text-muted">
+              {t('system', {
+                mode: t(`mode_${status.data.bluetooth.scanning_mode}`),
+                homekit: status.data.homekit.paired
+                  ? t('homekitPaired', { n: status.data.homekit.controllers })
+                  : t('homekitNotPaired'),
+                version: status.data.version,
+              })}
+            </p>
+          )}
+
+          <footer className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-muted">
             <a href="/api/export.csv" className="inline-flex items-center gap-1.5 text-ink-2 hover:text-ink" download>
               <DownloadIcon className="size-4" />
               {t('export')}

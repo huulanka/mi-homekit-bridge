@@ -52,3 +52,43 @@ export const DownloadIcon = ({ className }: IconProps) => (
     <path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14" />
   </svg>
 )
+
+export const CheckIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...common}>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="m8.5 12.2 2.4 2.4 4.7-5" />
+  </svg>
+)
+
+export const AlertIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} {...common}>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M12 7.5v5.5M12 16.2v.1" />
+  </svg>
+)
+
+export const DotIcon = ({ className }: IconProps) => (
+  <svg viewBox="0 0 24 24" className={className} aria-hidden>
+    <circle cx="12" cy="12" r="3.5" fill="currentColor" />
+  </svg>
+)
+
+/** Four bars of increasing height; `bars` of them are filled. */
+export function SignalIcon({ bars, className }: IconProps & { bars: number }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden>
+      {[0, 1, 2, 3].map((i) => (
+        <rect
+          key={i}
+          x={3.5 + i * 4.75}
+          y={17 - (i + 1) * 3.25}
+          width={3}
+          height={(i + 1) * 3.25 + 2}
+          rx={1}
+          fill="currentColor"
+          opacity={i < bars ? 1 : 0.25}
+        />
+      ))}
+    </svg>
+  )
+}

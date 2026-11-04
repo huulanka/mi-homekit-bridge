@@ -113,3 +113,15 @@ def test_describe_format(service_data: dict[str, bytes], expected: str) -> None:
 
 def test_describe_format_unknown() -> None:
     assert describe_format({"0000180f-0000-1000-8000-00805f9b34fb": b"\x00"}) is None
+
+
+def test_plaintext_bthome_with_bindkey_is_ignored_with_one_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    decoder = SensorDecoder(TEST_BINDKEY)  # e.g. a stock-firmware key left after flashing
+    frame = bthome_plaintext(temperature=22.5, humidity=50.0, battery=93)
+    with caplog.at_level(logging.WARNING):
+        assert decoder.decode(bthome_info(frame)) is None
+        assert decoder.decode(bthome_info(frame)) is None
+    assert [r.message for r in caplog.records].count(caplog.records[0].message) == 1
+    assert "remove its bindkey" in caplog.records[0].message

@@ -6,13 +6,30 @@ import asyncio
 from collections.abc import Callable
 
 from bleak import BleakScanner
+from bleak.args.bluez import BlueZScannerArgs, OrPattern
+from bleak.assigned_numbers import AdvertisementDataType
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from habluetooth import BluetoothServiceInfoBleak
 
-from .decoder import describe_format
+from .config import DEFAULT_ADAPTER, ScanningMode
+from .decoder import BTHOME_SERVICE_UUID, XIAOMI_SERVICE_UUID, describe_format
 
 ServiceInfoCallback = Callable[[BluetoothServiceInfoBleak], None]
+
+
+def _uuid16_le(uuid: str) -> bytes:
+    """``0000fe95-0000-...`` -> ``b"\\x95\\xfe"`` (as it appears in service data)."""
+    return int(uuid[4:8], 16).to_bytes(2, "little")
+
+
+# Passive scanning goes through BlueZ advertisement monitors, which need patterns.
+# These match the service data of MiBeacon and BTHome advertisements, so BlueZ
+# only forwards advertisements of supported sensors.
+PASSIVE_PATTERNS = [
+    OrPattern(0, AdvertisementDataType.SERVICE_DATA_UUID16, _uuid16_le(uuid))
+    for uuid in (XIAOMI_SERVICE_UUID, BTHOME_SERVICE_UUID)
+]
 
 
 def service_info_from_bleak(
@@ -35,14 +52,22 @@ def service_info_from_bleak(
     )
 
 
-def create_scanner(callback: ServiceInfoCallback) -> BleakScanner:
+def create_scanner(
+    callback: ServiceInfoCallback,
+    *,
+    adapter: str = DEFAULT_ADAPTER,
+    scanning_mode: ScanningMode = "active",
+) -> BleakScanner:
     """A scanner that forwards every advertisement to ``callback``."""
     loop = asyncio.get_running_loop()
 
     def on_detection(device: BLEDevice, advertisement: AdvertisementData) -> None:
         callback(service_info_from_bleak(device, advertisement, loop.time()))
 
-    return BleakScanner(detection_callback=on_detection)
+    bluez: BlueZScannerArgs = {"adapter": adapter}
+    if scanning_mode == "passive":
+        bluez["or_patterns"] = list(PASSIVE_PATTERNS)
+    return BleakScanner(detection_callback=on_detection, scanning_mode=scanning_mode, bluez=bluez)
 
 
 async def discover(seconds: float) -> list[tuple[str, str, int, str]]:

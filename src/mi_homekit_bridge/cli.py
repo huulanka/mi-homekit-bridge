@@ -1,4 +1,5 @@
-"""Command line interface: ``run``, ``scan``, ``fetch-keys``, ``set-key`` and ``demo``."""
+"""Command line interface: ``run``, ``scan``, ``fetch-keys``, ``set-key``, ``demo``
+and ``reset-bluetooth``."""
 
 from __future__ import annotations
 
@@ -6,11 +7,21 @@ import argparse
 import asyncio
 import getpass
 import logging
+import os
 import sys
 from pathlib import Path
 
 from . import __version__
-from .config import ConfigError, bindkey_env_var, load_config, normalize_mac, parse_bindkey
+from .config import (
+    DEFAULT_ADAPTER,
+    ConfigError,
+    bindkey_env_var,
+    load_config,
+    normalize_mac,
+    parse_bindkey,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = Path("/etc/mi-homekit-bridge/config.toml")
 DEFAULT_STATE_DIR = Path("/var/lib/mi-homekit-bridge")
@@ -65,6 +76,19 @@ def _build_parser() -> argparse.ArgumentParser:
     setkey.add_argument("mac", help="MAC address of the sensor")
     setkey.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE, metavar="PATH")
 
+    reset = sub.add_parser(
+        "reset-bluetooth",
+        help="reset the Bluetooth controller by re-binding its driver (root, used by systemd)",
+    )
+    reset.add_argument("-c", "--config", type=Path, default=DEFAULT_CONFIG)
+    reset.add_argument("--adapter", help="adapter name (default: from the config, else hci0)")
+    reset.add_argument(
+        "--if-exit-status",
+        type=int,
+        metavar="N",
+        help="only reset if $EXIT_STATUS (set by systemd for ExecStopPost=) equals N",
+    )
+
     demo = sub.add_parser("demo", help="serve the dashboard with generated sample data")
     demo.add_argument("--host", default="127.0.0.1")
     demo.add_argument("--port", type=int, default=8080)
@@ -74,9 +98,40 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     from .app import run_bridge
+    from .bluetooth import EXIT_CONTROLLER_RESET, ControllerResetRequired
 
     config = load_config(args.config)
-    asyncio.run(run_bridge(config, args.state_dir))
+    try:
+        asyncio.run(run_bridge(config, args.state_dir))
+    except ControllerResetRequired as err:
+        _LOGGER.error("Exiting so that the Bluetooth controller gets reset (%s)", err)
+        return EXIT_CONTROLLER_RESET
+    return 0
+
+
+def _cmd_reset_bluetooth(args: argparse.Namespace) -> int:
+    from .bluetooth import ResetError, reset_controller
+
+    if args.if_exit_status is not None and os.environ.get("EXIT_STATUS") != str(
+        args.if_exit_status
+    ):
+        return 0
+    adapter = args.adapter
+    if adapter is None:
+        try:
+            adapter = load_config(args.config).bluetooth.adapter
+        except ConfigError as err:
+            _LOGGER.warning("%s; using %s", err, DEFAULT_ADAPTER)
+            adapter = DEFAULT_ADAPTER
+    if os.geteuid() != 0:
+        print("reset-bluetooth must run as root", file=sys.stderr)
+        return 1
+    try:
+        device = reset_controller(adapter)
+    except ResetError as err:
+        print(f"Bluetooth reset failed: {err}", file=sys.stderr)
+        return 1
+    print(f"Bluetooth controller {adapter} reset ({device.name})")
     return 0
 
 
@@ -159,13 +214,13 @@ async def _serve_demo(host: str, port: int, days: int) -> None:
     import signal
     import tempfile
 
-    from .demo import create_demo_store
+    from .demo import create_demo_store, demo_status
     from .web import start_web
 
     with tempfile.TemporaryDirectory(prefix="mi-homekit-bridge-demo-") as tmp:
         print(f"Generating {days} days of sample data...")
         store = await asyncio.to_thread(create_demo_store, Path(tmp) / "demo.db", days)
-        runner = await start_web(store, host, port)
+        runner = await start_web(store, host, port, status=demo_status)
         print(f"Demo dashboard: http://{host}:{port}  (Ctrl+C to stop)")
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -200,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         "fetch-keys": _cmd_fetch_keys,
         "set-key": _cmd_set_key,
         "demo": _cmd_demo,
+        "reset-bluetooth": _cmd_reset_bluetooth,
     }
     try:
         return commands[args.command](args)

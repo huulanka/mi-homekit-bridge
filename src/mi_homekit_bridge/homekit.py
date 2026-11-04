@@ -12,6 +12,7 @@ from pathlib import Path
 from pyhap import util
 from pyhap.accessory import Accessory, Bridge
 from pyhap.accessory_driver import AccessoryDriver
+from pyhap.characteristic import Characteristic
 from pyhap.const import CATEGORY_SENSOR
 
 from . import __version__
@@ -38,11 +39,18 @@ def aid_for_mac(mac: str) -> int:
 
 
 class ThermometerAccessory(Accessory):
-    """Temperature, humidity and battery of one sensor."""
+    """Temperature, humidity and battery of one sensor.
+
+    The battery service is only added once a battery level is known: some sensors
+    (e.g. the LYWSD03MMC on recent stock firmware) never broadcast it, and HomeKit
+    has no "unknown" value, so it would show 0 % forever.
+    """
 
     category = CATEGORY_SENSOR
 
-    def __init__(self, driver: AccessoryDriver, name: str, mac: str) -> None:
+    def __init__(
+        self, driver: AccessoryDriver, name: str, mac: str, *, battery: bool = False
+    ) -> None:
         super().__init__(driver, name, aid=aid_for_mac(mac))
         self.set_info_service(
             firmware_revision=__version__,
@@ -52,7 +60,6 @@ class ThermometerAccessory(Accessory):
         )
         temperature = self.add_preload_service("TemperatureSensor", chars=["StatusFault"])
         humidity = self.add_preload_service("HumiditySensor", chars=["StatusFault"])
-        battery = self.add_preload_service("BatteryService")
 
         self._temperature = temperature.configure_char("CurrentTemperature")
         self._humidity = humidity.configure_char("CurrentRelativeHumidity")
@@ -60,22 +67,37 @@ class ThermometerAccessory(Accessory):
             temperature.configure_char("StatusFault", value=_GENERAL_FAULT),
             humidity.configure_char("StatusFault", value=_GENERAL_FAULT),
         ]
-        self._battery_level = battery.configure_char("BatteryLevel")
-        self._battery_low = battery.configure_char("StatusLowBattery")
-        battery.configure_char("ChargingState", value=_NOT_CHARGEABLE)
+        self._battery: tuple[Characteristic, Characteristic] | None = None
+        """``(BatteryLevel, StatusLowBattery)`` once the battery service exists."""
+        if battery:
+            self._battery = self._add_battery_service()
 
-    def apply(self, reading: Reading) -> None:
-        """Push new values to HomeKit."""
+    def _add_battery_service(self) -> tuple[Characteristic, Characteristic]:
+        service = self.driver.loader.get_service("BatteryService")
+        self.add_service(service)
+        service.configure_char("ChargingState", value=_NOT_CHARGEABLE)
+        return service.configure_char("BatteryLevel"), service.configure_char("StatusLowBattery")
+
+    def apply(self, reading: Reading) -> bool:
+        """Push new values to HomeKit.
+
+        Returns ``True`` if the accessory gained its battery service. While the
+        bridge runs, call ``driver.config_changed()`` then, so iOS reloads it.
+        """
         if reading.temperature is not None:
             self._temperature.set_value(round(reading.temperature, 1))
         if reading.humidity is not None:
             self._humidity.set_value(round(reading.humidity))
-        if reading.battery is not None:
-            level = max(0, min(100, reading.battery))
-            self._battery_level.set_value(level)
-            self._battery_low.set_value(
-                _BATTERY_LOW if level < LOW_BATTERY_PERCENT else _BATTERY_NORMAL
-            )
+        if reading.battery is None:
+            return False
+        added = self._battery is None
+        if self._battery is None:
+            self._battery = self._add_battery_service()
+        level_char, low_char = self._battery
+        level = max(0, min(100, reading.battery))
+        level_char.set_value(level)
+        low_char.set_value(_BATTERY_LOW if level < LOW_BATTERY_PERCENT else _BATTERY_NORMAL)
+        return added
 
     def set_fault(self, fault: bool) -> None:
         """Flag the sensor as faulty in HomeKit, e.g. when it stopped reporting."""
@@ -92,8 +114,8 @@ class ThermometerAccessory(Accessory):
         return float(self._humidity.get_value())
 
     @property
-    def battery(self) -> int:
-        return int(self._battery_level.get_value())
+    def battery(self) -> int | None:
+        return None if self._battery is None else int(self._battery[0].get_value())
 
     @property
     def fault(self) -> bool:
@@ -142,9 +164,12 @@ def create_driver(
 
 
 def create_bridge(
-    driver: AccessoryDriver, config: BridgeConfig
+    driver: AccessoryDriver, config: BridgeConfig, with_battery: frozenset[str] = frozenset()
 ) -> tuple[Bridge, dict[str, ThermometerAccessory]]:
-    """Create the bridge and one accessory per configured sensor, keyed by MAC."""
+    """Create the bridge and one accessory per configured sensor, keyed by MAC.
+
+    Sensors in ``with_battery`` (MACs) get their battery service right away.
+    """
     bridge = Bridge(driver, config.name)
     bridge.set_info_service(
         firmware_revision=__version__,
@@ -155,7 +180,9 @@ def create_bridge(
     accessories: dict[str, ThermometerAccessory] = {}
     seen_aids: dict[int, str] = {}
     for sensor in config.sensors:
-        accessory = ThermometerAccessory(driver, sensor.name, sensor.mac)
+        accessory = ThermometerAccessory(
+            driver, sensor.name, sensor.mac, battery=sensor.mac in with_battery
+        )
         if accessory.aid in seen_aids:  # pragma: no cover - 1 in 2^31 chance
             raise ValueError(f"aid collision between {seen_aids[accessory.aid]} and {sensor.mac}")
         seen_aids[accessory.aid] = sensor.mac
