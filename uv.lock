@@ -1619,7 +1619,7 @@ wheels = [
 
 [[package]]
 name = "xiaomi-ble"
-version = "1.21.2"
+version = "1.22.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1633,9 +1633,9 @@ dependencies = [
     { name = "pycryptodomex" },
     { name = "sensor-state-data" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/12/23/0d125c94d4cc5ff48f691f5a95065bfa88cef68893e97135c9102a8d82bb/xiaomi_ble-1.21.2.tar.gz", hash = "sha256:59d644442174479f78b524db5091c399ed7a58bc119e0bde6c82e5001241268b", size = 33716, upload-time = "2026-10-24T19:50:31.169Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bb/80/aab66584808efede912c485f016be70814aeace308eb4756bd38f6ec3ff8/xiaomi_ble-1.22.1.tar.gz", hash = "sha256:978e608cbb6ad91fb64ed43346847acf05db42918ebbc212a4a6f4754b037958", size = 33883, upload-time = "2026-11-14T20:47:03.09Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ee/fa/f6ac6d3be509481ea281430fc0309930cb2c6a588d437025fd9949679fec/xiaomi_ble-1.21.2-py3-none-any.whl", hash = "sha256:bce0a627807779cf671e6338526bd4ccb806e437b7d983b0aef8b2b9d24f7449", size = 34082, upload-time = "2026-10-24T19:50:29.542Z" },
+    { url = "https://files.pythonhosted.org/packages/57/2d/6a967e1bd13c9927d1eb0970590c3254e815d28194afda36f40693ee8d3c/xiaomi_ble-1.22.1-py3-none-any.whl", hash = "sha256:b48a8bd69d456226dad0c46a1d13af628098324eabf62ecc7c1c187763199fde", size = 34278, upload-time = "2026-11-14T20:47:01.848Z" },
 ]
 
 [[package]]
